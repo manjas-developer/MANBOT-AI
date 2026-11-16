@@ -1,6 +1,6 @@
 {
-  "name": "",
-  "description": "",
+  "name": "MANBOT",
+  "description": "MANBOT is a full-stack multimodal AI workspace and creative studio powered by Google Gemini, featuring streaming chat, a side-by-side Canvas editor, live Google Search grounding, multimodal file analysis, and an AI Image Generation Studio.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
