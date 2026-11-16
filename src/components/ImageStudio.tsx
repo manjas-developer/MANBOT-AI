@@ -9,11 +9,12 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import { GeneratedImageItem, ImageAspectRatio } from '../types';
+import { GeneratedImageItem, ImageAspectRatio, UserIdentity } from '../types';
 import { IMAGE_STUDIO_PRESETS } from '../data/starterPrompts';
 
 interface ImageStudioProps {
   images: GeneratedImageItem[];
+  userIdentity: UserIdentity;
   onAddImage: (item: GeneratedImageItem) => void;
   onDeleteImage: (id: string) => void;
 }
@@ -28,6 +29,7 @@ const ASPECT_RATIOS: { value: ImageAspectRatio; label: string }[] = [
 
 export const ImageStudio: React.FC<ImageStudioProps> = ({
   images,
+  userIdentity,
   onAddImage,
   onDeleteImage,
 }) => {
@@ -77,6 +79,7 @@ export const ImageStudio: React.FC<ImageStudioProps> = ({
         body: JSON.stringify({
           prompt: prompt.trim(),
           aspectRatio,
+          userIdentity,
           referenceImage: referenceImage
             ? {
                 mimeType: referenceImage.mimeType,

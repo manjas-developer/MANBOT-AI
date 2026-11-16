@@ -26,6 +26,16 @@ function getGenAIClient(): GoogleGenAI {
   });
 }
 
+function isQuotaExhaustedError(err: unknown): boolean {
+  const raw = err instanceof Error ? err.message : String(err);
+  return (
+    raw.includes('429') ||
+    raw.includes('RESOURCE_EXHAUSTED') ||
+    raw.toLowerCase().includes('quota') ||
+    raw.toLowerCase().includes('rate limit')
+  );
+}
+
 function formatApiError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
   if (raw.includes('403') || raw.includes('PERMISSION_DENIED') || raw.includes('API_KEY_INVALID') || raw.includes('400')) {
@@ -33,8 +43,8 @@ function formatApiError(err: unknown): string {
       return 'Authentication error with Gemini API. Please check or select your API key in the Settings > Secrets panel.';
     }
   }
-  if (raw.includes('429') || raw.includes('RESOURCE_EXHAUSTED')) {
-    return 'Rate limit or quota reached (429). Upgrading to a paid tier increases quota—you can select a billing-enabled API key in the Settings > Secrets panel.';
+  if (isQuotaExhaustedError(err)) {
+    return 'Free-tier API rate limit or quota reached (429 RESOURCE_EXHAUSTED). You can switch to high-throughput Flash-Lite or attach a fresh free or billing-enabled API key in the Settings > Secrets panel to continue immediately.';
   }
   return raw || 'An unexpected error occurred while communicating with MANBOT.';
 }
@@ -68,20 +78,82 @@ interface IncomingMessage {
   attachments?: IncomingAttachment[];
 }
 
+interface OperatorUsageRecord {
+  userId: string;
+  userName: string;
+  deviceLabel: string;
+  totalRequests: number;
+  chatRequests: number;
+  canvasRequests: number;
+  imageRequests: number;
+  lastModel: string;
+  lastActiveAt: string;
+}
+
+const operatorUsageLedger = new Map<string, OperatorUsageRecord>();
+
+function recordOperatorApiCall(params: {
+  userId?: string;
+  userName?: string;
+  deviceLabel?: string;
+  kind: 'chat' | 'canvas' | 'image';
+  model: string;
+}) {
+  const id = (params.userId || 'USR-DEFAULT').trim();
+  const name = (params.userName || 'Primary Operator').trim();
+  const device = (params.deviceLabel || 'Web Studio').trim();
+
+  const existing = operatorUsageLedger.get(id) || {
+    userId: id,
+    userName: name,
+    deviceLabel: device,
+    totalRequests: 0,
+    chatRequests: 0,
+    canvasRequests: 0,
+    imageRequests: 0,
+    lastModel: params.model,
+    lastActiveAt: new Date().toISOString(),
+  };
+
+  existing.userName = name;
+  existing.deviceLabel = device;
+  existing.totalRequests += 1;
+  if (params.kind === 'chat') existing.chatRequests += 1;
+  if (params.kind === 'canvas') existing.canvasRequests += 1;
+  if (params.kind === 'image') existing.imageRequests += 1;
+  existing.lastModel = params.model;
+  existing.lastActiveAt = new Date().toISOString();
+
+  operatorUsageLedger.set(id, existing);
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '35mb' }));
 
-  // Health endpoint
+  // Health & Connection Verification endpoint
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({
       status: 'ok',
       assistant: 'MANBOT',
       hasApiKey: Boolean(process.env.GEMINI_API_KEY),
+      timestamp: new Date().toISOString(),
     });
   });
 
-  // 1. Streaming Chat + Multimodal Analysis + Google Search Grounding
+  // Operator API Usage Attribution Ledger endpoint
+  app.get('/api/usage', (_req: Request, res: Response) => {
+    const operators = Array.from(operatorUsageLedger.values()).sort(
+      (a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime()
+    );
+    const totalApiCalls = operators.reduce((sum, item) => sum + item.totalRequests, 0);
+    res.json({
+      operators,
+      totalApiCalls,
+    });
+  });
+
+  // 1. Streaming Chat + Multimodal Analysis + Google Search Grounding (with Seamless Quota Fallback)
   app.post('/api/chat/stream', async (req: Request, res: Response) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -100,6 +172,7 @@ async function startServer() {
         useGoogleSearch = false,
         systemInstruction = '',
         activeCanvasContext = null,
+        userIdentity = null,
       } = req.body as {
         messages: IncomingMessage[];
         model?: string;
@@ -107,10 +180,19 @@ async function startServer() {
         useGoogleSearch?: boolean;
         systemInstruction?: string;
         activeCanvasContext?: { title: string; language: string; content: string } | null;
+        userIdentity?: { id?: string; name?: string; deviceLabel?: string } | null;
       };
 
       const validModel =
         model === 'gemini-3.1-flash-lite' ? 'gemini-3.1-flash-lite' : 'gemini-4-hydrogen';
+
+      recordOperatorApiCall({
+        userId: userIdentity?.id,
+        userName: userIdentity?.name,
+        deviceLabel: userIdentity?.deviceLabel,
+        kind: 'chat',
+        model: validModel,
+      });
 
       const contents = messages.map((msg) => {
         const parts: Array<
@@ -159,25 +241,43 @@ async function startServer() {
         .filter(Boolean)
         .join('\n\n');
 
-      const config: Record<string, unknown> = {
-        systemInstruction: fullSystemInstruction,
+      const buildConfig = (targetModel: string) => {
+        const cfg: Record<string, unknown> = {
+          systemInstruction: fullSystemInstruction,
+        };
+        if (targetModel === 'gemini-4-hydrogen') {
+          cfg.thinkingConfig = {
+            thinkingLevel: resolveThinkingLevel(thinkingLevel, targetModel),
+          };
+        }
+        if (useGoogleSearch) {
+          cfg.tools = [{ googleSearch: {} }];
+        }
+        return cfg;
       };
 
-      if (validModel === 'gemini-4-hydrogen') {
-        config.thinkingConfig = {
-          thinkingLevel: resolveThinkingLevel(thinkingLevel, validModel),
-        };
+      let streamResponse;
+      try {
+        streamResponse = await ai.models.generateContentStream({
+          model: validModel,
+          contents,
+          config: buildConfig(validModel),
+        });
+      } catch (primaryErr) {
+        if (isQuotaExhaustedError(primaryErr) && validModel !== 'gemini-3.1-flash-lite') {
+          sendEvent({
+            type: 'fallback_notice',
+            text: 'Primary model quota reached — seamlessly switched to high-throughput gemini-3.1-flash-lite.',
+          });
+          streamResponse = await ai.models.generateContentStream({
+            model: 'gemini-3.1-flash-lite',
+            contents,
+            config: buildConfig('gemini-3.1-flash-lite'),
+          });
+        } else {
+          throw primaryErr;
+        }
       }
-
-      if (useGoogleSearch) {
-        config.tools = [{ googleSearch: {} }];
-      }
-
-      const streamResponse = await ai.models.generateContentStream({
-        model: validModel,
-        contents,
-        config,
-      });
 
       const collectedSources = new Map<string, { title: string; uri: string }>();
       const collectedQueries = new Set<string>();
@@ -220,6 +320,7 @@ async function startServer() {
     } catch (error) {
       sendEvent({
         type: 'error',
+        isQuotaError: isQuotaExhaustedError(error),
         message: formatApiError(error),
       });
       res.end();
@@ -235,12 +336,22 @@ async function startServer() {
         language = 'markdown',
         content = '',
         instruction = 'Improve clarity and structure',
+        userIdentity = null,
       } = req.body as {
         title?: string;
         language?: string;
         content: string;
         instruction: string;
+        userIdentity?: { id?: string; name?: string; deviceLabel?: string } | null;
       };
+
+      recordOperatorApiCall({
+        userId: userIdentity?.id,
+        userName: userIdentity?.name,
+        deviceLabel: userIdentity?.deviceLabel,
+        kind: 'canvas',
+        model: 'gemini-4-hydrogen',
+      });
 
       const prompt = `You are MANBOT's side-by-side Canvas editor engine.
 Artifact Title: ${title}
@@ -254,13 +365,25 @@ ${content}
 
 Return ONLY the transformed ${language} content without surrounding conversational commentary or outer markdown fences (unless the language itself is markdown and uses internal code blocks).`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: prompt,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        },
-      });
+      let response;
+      try {
+        response = await ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: prompt,
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          },
+        });
+      } catch (primaryErr) {
+        if (isQuotaExhaustedError(primaryErr)) {
+          response = await ai.models.generateContent({
+            model: 'gemini-3.1-flash-lite',
+            contents: prompt,
+          });
+        } else {
+          throw primaryErr;
+        }
+      }
 
       let updatedContent = (response.text ?? '').trim();
       // Strip outer code fence if model wrapped it
@@ -275,6 +398,7 @@ Return ONLY the transformed ${language} content without surrounding conversation
       });
     } catch (error) {
       res.status(500).json({
+        isQuotaError: isQuotaExhaustedError(error),
         error: formatApiError(error),
       });
     }
@@ -288,11 +412,21 @@ Return ONLY the transformed ${language} content without surrounding conversation
         prompt,
         aspectRatio = '1:1',
         referenceImage = null,
+        userIdentity = null,
       } = req.body as {
         prompt: string;
         aspectRatio?: '1:1' | '16:9' | '4:3' | '3:4' | '9:16';
         referenceImage?: { mimeType: string; base64Data: string } | null;
+        userIdentity?: { id?: string; name?: string; deviceLabel?: string } | null;
       };
+
+      recordOperatorApiCall({
+        userId: userIdentity?.id,
+        userName: userIdentity?.name,
+        deviceLabel: userIdentity?.deviceLabel,
+        kind: 'image',
+        model: 'gemini-3.1-flash-lite-image',
+      });
 
       if (!prompt || !prompt.trim()) {
         res.status(400).json({ error: 'Please provide an image description prompt.' });
@@ -346,7 +480,7 @@ Return ONLY the transformed ${language} content without surrounding conversation
           return;
         }
       } catch {
-        // Fallback to free-tier Gemini 4 Hydrogen SVG Studio Render when paid key is not enabled
+        // Fallback to free-tier SVG Studio Render when paid key is not enabled
       }
 
       const dimensionsMap: Record<string, { w: number; h: number }> = {
@@ -357,15 +491,28 @@ Return ONLY the transformed ${language} content without surrounding conversation
         '9:16': { w: 540, h: 960 },
       };
       const dims = dimensionsMap[aspectRatio] || { w: 800, h: 800 };
+      const svgPrompt = `Create a richly detailed, artistic, studio-grade SVG artwork (width="${dims.w}" height="${dims.h}" viewBox="0 0 ${dims.w} ${dims.h}") depicting: "${prompt.trim()}".
+Use sophisticated gradients (<linearGradient>, <radialGradient>), layered geometric and organic shapes, atmospheric lighting effects, and rich colors. Return ONLY raw valid <svg xmlns="http://www.w3.org/2000/svg" ...>...</svg> code without markdown fences or explanations.`;
 
-      const svgResponse = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: `Create a richly detailed, artistic, studio-grade SVG artwork (width="${dims.w}" height="${dims.h}" viewBox="0 0 ${dims.w} ${dims.h}") depicting: "${prompt.trim()}".
-Use sophisticated gradients (<linearGradient>, <radialGradient>), layered geometric and organic shapes, atmospheric lighting effects, and rich colors. Return ONLY raw valid <svg xmlns="http://www.w3.org/2000/svg" ...>...</svg> code without markdown fences or explanations.`,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        },
-      });
+      let svgResponse;
+      try {
+        svgResponse = await ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: svgPrompt,
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          },
+        });
+      } catch (svgPrimaryErr) {
+        if (isQuotaExhaustedError(svgPrimaryErr)) {
+          svgResponse = await ai.models.generateContent({
+            model: 'gemini-3.1-flash-lite',
+            contents: svgPrompt,
+          });
+        } else {
+          throw svgPrimaryErr;
+        }
+      }
 
       const rawSvg = (svgResponse.text ?? '').trim();
       const svgMatch = rawSvg.match(/<svg[\s\S]*?<\/svg>/i);
@@ -373,7 +520,7 @@ Use sophisticated gradients (<linearGradient>, <radialGradient>), layered geomet
         const base64Svg = Buffer.from(svgMatch[0], 'utf-8').toString('base64');
         res.json({
           imageUrl: `data:image/svg+xml;base64,${base64Svg}`,
-          caption: 'Rendered via MANBOT Free-Tier Vector Studio (gemini-4-hydrogen)',
+          caption: 'Rendered via MANBOT Free-Tier Vector Studio',
         });
         return;
       }
@@ -383,6 +530,7 @@ Use sophisticated gradients (<linearGradient>, <radialGradient>), layered geomet
       });
     } catch (error) {
       res.status(500).json({
+        isQuotaError: isQuotaExhaustedError(error),
         error: formatApiError(error),
       });
     }

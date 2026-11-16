@@ -27,6 +27,8 @@ export interface ChatMessage {
   modelId?: ModelOptionId;
   timestamp: string;
   isError?: boolean;
+  isQuotaError?: boolean;
+  fallbackNotice?: string;
   linkedCanvasId?: string;
 }
 
@@ -81,3 +83,22 @@ export interface PromptTemplate {
   thinkingLevel?: ReasoningLevel;
   opensCanvas?: boolean;
 }
+
+export interface UserIdentity {
+  id: string;
+  name: string;
+  deviceLabel: string;
+}
+
+export interface ApiUsageRecord {
+  userId: string;
+  userName: string;
+  deviceLabel: string;
+  totalRequests: number;
+  chatRequests: number;
+  canvasRequests: number;
+  imageRequests: number;
+  lastModel: string;
+  lastActiveAt: string;
+}
+

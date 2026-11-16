@@ -7,11 +7,12 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowUp,
   BookOpen,
-  BrainCircuit,
   Columns,
   Download,
   ExternalLink,
+  FileCode2,
   FileText,
+  Fingerprint,
   Globe,
   Image as ImageIcon,
   Loader2,
@@ -20,11 +21,13 @@ import {
   Paperclip,
   Pin,
   Plus,
+  RefreshCw,
   Search,
   SlidersHorizontal,
   Sparkles,
   Trash2,
   X,
+  Zap,
 } from 'lucide-react';
 import {
   Attachment,
@@ -37,6 +40,7 @@ import {
   ModelOptionId,
   PromptTemplate,
   ReasoningLevel,
+  UserIdentity,
   WorkspaceTab,
 } from './types';
 import { STARTER_PROMPTS } from './data/starterPrompts';
@@ -45,12 +49,47 @@ import { CanvasPane } from './components/CanvasPane';
 import { ImageStudio } from './components/ImageStudio';
 import { SavedCanvasesView } from './components/SavedCanvasesView';
 import { PromptLibraryView } from './components/PromptLibraryView';
+import { QuotaRecoveryModal } from './components/QuotaRecoveryModal';
+import { UserIdentityModal } from './components/UserIdentityModal';
 
 const STORAGE_KEYS = {
   SESSIONS: 'manbot_sessions_v1',
   CANVASES: 'manbot_canvases_v1',
   IMAGES: 'manbot_images_v1',
+  IDENTITY: 'manbot_user_identity_v1',
 };
+
+function detectDeviceLabel(): string {
+  if (typeof window === 'undefined') return 'Desktop Studio';
+  const w = window.innerWidth;
+  if (w < 640) return 'Mobile Handheld';
+  if (w < 1024) return 'Tablet Touch';
+  return 'Desktop Studio';
+}
+
+function getOrCreateInitialIdentity(): UserIdentity {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEYS.IDENTITY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed?.id && parsed?.name) {
+        return {
+          id: parsed.id,
+          name: parsed.name,
+          deviceLabel: detectDeviceLabel(),
+        };
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  const randomSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
+  return {
+    id: `USR-${randomSuffix}`,
+    name: 'Primary Operator',
+    deviceLabel: detectDeviceLabel(),
+  };
+}
 
 const DEFAULT_CANVAS: CanvasArtifact = {
   id: 'canvas-welcome-demo',
@@ -68,14 +107,14 @@ const DEFAULT_CANVAS: CanvasArtifact = {
       font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
       background: #0B0F19;
       color: #F1F5F9;
-      padding: 28px;
+      padding: 24px;
     }
     .panel {
       background: #111827;
       border: 1px solid rgba(255, 255, 255, 0.08);
       border-radius: 12px;
-      padding: 24px;
-      max-width: 560px;
+      padding: 22px;
+      max-width: 540px;
       margin: 0 auto;
     }
     .kicker {
@@ -84,16 +123,16 @@ const DEFAULT_CANVAS: CanvasArtifact = {
       margin-bottom: 6px;
     }
     h2 {
-      font-size: 20px;
+      font-size: 19px;
       font-weight: 600;
       color: #FFFFFF;
       margin-bottom: 16px;
     }
     .metrics {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 12px;
-      margin-bottom: 20px;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 10px;
+      margin-bottom: 18px;
       font-variant-numeric: tabular-nums;
     }
     .metric-box {
@@ -103,7 +142,7 @@ const DEFAULT_CANVAS: CanvasArtifact = {
       padding: 12px;
     }
     .metric-label { font-size: 11px; color: #94A3B8; }
-    .metric-val { font-size: 18px; font-weight: 600; color: #F8FAFC; margin-top: 4px; }
+    .metric-val { font-size: 17px; font-weight: 600; color: #F8FAFC; margin-top: 4px; }
     button {
       background: #4F46E5;
       color: white;
@@ -179,7 +218,16 @@ function extractFirstCodeBlock(text: string): {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('workspace');
-  const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
+  // Sidebar defaults open on wide desktop, closed on mobile/tablet so it never crowds
+  const [sidebarOpen, setSidebarOpen] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth >= 1200 : true
+  );
+
+  // User Identity State for API Attribution
+  const [userIdentity, setUserIdentity] = useState<UserIdentity>(
+    getOrCreateInitialIdentity
+  );
+  const [isIdentityModalOpen, setIsIdentityModalOpen] = useState<boolean>(false);
 
   // Persistent Sessions State
   const [sessions, setSessions] = useState<ChatSession[]>(() => {
@@ -214,6 +262,9 @@ export default function App() {
   });
 
   const [openCanvasId, setOpenCanvasId] = useState<string | null>(null);
+  const [isCanvasExpanded, setIsCanvasExpanded] = useState<boolean>(false);
+  // On mobile/tablet (< 1024px), switches smoothly between Chat and Canvas when a Canvas is open
+  const [mobileWorkspacePane, setMobileWorkspacePane] = useState<'chat' | 'canvas'>('chat');
 
   // Persistent Studio Images State
   const [studioImages, setStudioImages] = useState<GeneratedImageItem[]>(() => {
@@ -236,9 +287,11 @@ export default function App() {
   const [thinkingLevel, setThinkingLevel] = useState<ReasoningLevel>('HIGH');
   const [selectedModel, setSelectedModel] = useState<ModelOptionId>('gemini-4-hydrogen');
   const [customInstruction, setCustomInstruction] = useState<string>('');
-  const [showPersonaDrawer, setShowPersonaDrawer] = useState<boolean>(false);
+  const [showEnginePopover, setShowEnginePopover] = useState<boolean>(false);
   const [sidebarSearch, setSidebarSearch] = useState<string>('');
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
+  const [isQuotaModalOpen, setIsQuotaModalOpen] = useState<boolean>(false);
+  const [lastFailedPrompt, setLastFailedPrompt] = useState<string>('');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -268,6 +321,26 @@ export default function App() {
     }
   }, [studioImages]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEYS.IDENTITY, JSON.stringify(userIdentity));
+    } catch {
+      // ignore
+    }
+  }, [userIdentity]);
+
+  // Dynamically update device label on resize
+  useEffect(() => {
+    const handleResize = () => {
+      const nextLabel = detectDeviceLabel();
+      setUserIdentity((prev) =>
+        prev.deviceLabel === nextLabel ? prev : { ...prev, deviceLabel: nextLabel }
+      );
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
   const currentSession =
     sessions.find((s) => s.id === activeSessionId) || sessions[0];
 
@@ -283,8 +356,12 @@ export default function App() {
     setSessions((prev) => [fresh, ...prev]);
     setActiveSessionId(fresh.id);
     setActiveTab('workspace');
+    setMobileWorkspacePane('chat');
     setInputPrompt('');
     setAttachments([]);
+    if (window.innerWidth < 1024) {
+      setSidebarOpen(false);
+    }
   };
 
   const handleDeleteSession = (id: string, e: React.MouseEvent) => {
@@ -332,12 +409,21 @@ export default function App() {
     e.target.value = '';
   };
 
+  const activateCanvas = (canvasId: string) => {
+    setOpenCanvasId(canvasId);
+    setActiveTab('workspace');
+    setMobileWorkspacePane('canvas');
+    // Shape-shift: automatically collapse left sidebar when opening split-screen Canvas so layout never crowds
+    if (window.innerWidth < 1440) {
+      setSidebarOpen(false);
+    }
+  };
+
   const handleOpenInCanvas = (
     code: string,
     language: CanvasLanguage,
     suggestedTitle: string
   ) => {
-    // Check if an identical canvas already exists
     const existing = canvases.find(
       (c) => c.title === suggestedTitle && c.language === language
     );
@@ -351,8 +437,7 @@ export default function App() {
       setCanvases((prev) =>
         prev.map((c) => (c.id === existing.id ? updated : c))
       );
-      setOpenCanvasId(existing.id);
-      setActiveTab('workspace');
+      activateCanvas(existing.id);
       return;
     }
 
@@ -365,8 +450,7 @@ export default function App() {
       history: [],
     };
     setCanvases((prev) => [created, ...prev]);
-    setOpenCanvasId(created.id);
-    setActiveTab('workspace');
+    activateCanvas(created.id);
   };
 
   const handleUpdateCanvas = (updated: CanvasArtifact) => {
@@ -395,8 +479,7 @@ export default function App() {
       history: [],
     };
     setCanvases((prev) => [created, ...prev]);
-    setOpenCanvasId(created.id);
-    setActiveTab('workspace');
+    activateCanvas(created.id);
   };
 
   const sendMessage = async (
@@ -404,6 +487,7 @@ export default function App() {
     options?: {
       forceSearch?: boolean;
       forceThinking?: ReasoningLevel;
+      forceModel?: ModelOptionId;
       autoOpenCanvas?: boolean;
     }
   ) => {
@@ -412,7 +496,11 @@ export default function App() {
 
     const effectiveSearch = options?.forceSearch ?? useGoogleSearch;
     const effectiveThinking = options?.forceThinking ?? thinkingLevel;
+    const effectiveModel = options?.forceModel ?? selectedModel;
 
+    if (options?.forceModel !== undefined) {
+      setSelectedModel(options.forceModel);
+    }
     if (options?.forceSearch !== undefined) {
       setUseGoogleSearch(options.forceSearch);
     }
@@ -420,13 +508,16 @@ export default function App() {
       setThinkingLevel(options.forceThinking);
     }
 
+    setShowEnginePopover(false);
+    setMobileWorkspacePane('chat');
+
     const userMessage: ChatMessage = {
       id: `msg-${Date.now()}-user`,
       role: 'user',
       text: textToSend,
       attachments: attachments.length > 0 ? [...attachments] : undefined,
       thinkingLevel: effectiveThinking,
-      modelId: selectedModel,
+      modelId: effectiveModel,
       timestamp: new Date().toISOString(),
     };
 
@@ -436,7 +527,7 @@ export default function App() {
       role: 'model',
       text: '',
       thinkingLevel: effectiveThinking,
-      modelId: selectedModel,
+      modelId: effectiveModel,
       timestamp: new Date().toISOString(),
     };
 
@@ -478,10 +569,11 @@ export default function App() {
               base64Data: a.base64Data,
             })),
           })),
-          model: selectedModel,
+          model: effectiveModel,
           thinkingLevel: effectiveThinking,
           useGoogleSearch: effectiveSearch,
           systemInstruction: customInstruction,
+          userIdentity,
           activeCanvasContext: activeCanvas
             ? {
                 title: activeCanvas.title,
@@ -556,8 +648,31 @@ export default function App() {
                     : s
                 )
               );
+            } else if (payload.type === 'fallback_notice' && typeof payload.text === 'string') {
+              setSessions((prev) =>
+                prev.map((s) =>
+                  s.id === currentSession.id
+                    ? {
+                        ...s,
+                        messages: s.messages.map((m) =>
+                          m.id === modelMessageId
+                            ? {
+                                ...m,
+                                fallbackNotice: payload.text,
+                                modelId: 'gemini-3.1-flash-lite',
+                              }
+                            : m
+                        ),
+                      }
+                    : s
+                )
+              );
             } else if (payload.type === 'error') {
-              throw new Error(payload.message || 'Streaming error');
+              const errObj = new Error(payload.message || 'Streaming error') as Error & {
+                isQuotaError?: boolean;
+              };
+              errObj.isQuotaError = Boolean(payload.isQuotaError);
+              throw errObj;
             }
           } catch (innerErr) {
             if (innerErr instanceof Error && innerErr.message !== 'Unexpected end of JSON input') {
@@ -567,7 +682,6 @@ export default function App() {
         }
       }
 
-      // If user clicked a Canvas starter prompt or asked to open in Canvas, auto-promote the first code block
       if (options?.autoOpenCanvas && accumulatedText) {
         const extracted = extractFirstCodeBlock(accumulatedText);
         if (extracted) {
@@ -583,6 +697,17 @@ export default function App() {
         err instanceof Error
           ? err.message
           : 'Failed to connect to MANBOT backend.';
+      const quotaFlag =
+        Boolean((err as { isQuotaError?: boolean })?.isQuotaError) ||
+        errorMessage.includes('429') ||
+        errorMessage.includes('RESOURCE_EXHAUSTED') ||
+        errorMessage.toLowerCase().includes('quota');
+
+      if (quotaFlag) {
+        setLastFailedPrompt(textToSend);
+        setIsQuotaModalOpen(true);
+      }
+
       setSessions((prev) =>
         prev.map((s) =>
           s.id === currentSession.id
@@ -594,6 +719,7 @@ export default function App() {
                         ...m,
                         text: errorMessage,
                         isError: true,
+                        isQuotaError: quotaFlag,
                       }
                     : m
                 ),
@@ -610,11 +736,15 @@ export default function App() {
     if (!currentSession) return;
     const mdLines = [
       `# ${currentSession.title}`,
-      `Exported from MANBOT · ${new Date().toLocaleString()}`,
+      `Exported from MANBOT · Operator: ${userIdentity.name} (${userIdentity.id}) · ${new Date().toLocaleString()}`,
       '',
     ];
     currentSession.messages.forEach((m) => {
-      mdLines.push(`### ${m.role === 'user' ? 'You' : 'MANBOT'} (${new Date(m.timestamp).toLocaleTimeString()})`);
+      mdLines.push(
+        `### ${m.role === 'user' ? `${userIdentity.name} (${userIdentity.id})` : 'MANBOT'} (${new Date(
+          m.timestamp
+        ).toLocaleTimeString()})`
+      );
       mdLines.push(m.text);
       if (m.groundingSources && m.groundingSources.length > 0) {
         mdLines.push('\n**Verified Web Sources:**');
@@ -654,9 +784,9 @@ export default function App() {
     });
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#0B0F19] text-slate-100">
+    <div className="flex flex-col h-dvh w-screen overflow-hidden bg-[#0B0F19] text-slate-100">
       {/* Strict 3-Zone Top Navigation Bar Contract */}
-      <header className="flex items-center justify-between gap-8 px-6 py-3.5 border-b border-white/[0.08] bg-[#0B0F19] shrink-0">
+      <header className="flex items-center justify-between gap-4 sm:gap-8 px-4 sm:px-6 py-3 border-b border-white/[0.08] bg-[#0B0F19] shrink-0">
         {/* Zone 1: Single text element wordmark */}
         <a
           href="#workspace"
@@ -669,8 +799,8 @@ export default function App() {
           MANBOT
         </a>
 
-        {/* Zone 2: 4 concise single-line text navigation links */}
-        <nav className="flex items-center gap-6 text-sm font-medium text-slate-400 overflow-x-auto">
+        {/* Zone 2: 4 concise single-line text navigation links (Desktop & Tablet) */}
+        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-400">
           <a
             href="#workspace"
             onClick={(e) => {
@@ -734,7 +864,7 @@ export default function App() {
           <button
             type="button"
             onClick={handleNewSession}
-            className="px-4 py-2 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="px-3.5 py-2 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             New Session
           </button>
@@ -745,6 +875,7 @@ export default function App() {
       {activeTab === 'image-studio' ? (
         <ImageStudio
           images={studioImages}
+          userIdentity={userIdentity}
           onAddImage={(item) => setStudioImages((prev) => [item, ...prev])}
           onDeleteImage={(id) =>
             setStudioImages((prev) => prev.filter((i) => i.id !== id))
@@ -753,10 +884,7 @@ export default function App() {
       ) : activeTab === 'canvases' ? (
         <SavedCanvasesView
           canvases={canvases}
-          onOpenCanvas={(artifact) => {
-            setOpenCanvasId(artifact.id);
-            setActiveTab('workspace');
-          }}
+          onOpenCanvas={(artifact) => activateCanvas(artifact.id)}
           onCreateBlankCanvas={handleCreateBlankCanvas}
           onDeleteCanvas={(id) => {
             setCanvases((prev) => prev.filter((c) => c.id !== id));
@@ -766,23 +894,38 @@ export default function App() {
       ) : activeTab === 'prompts' ? (
         <PromptLibraryView onSelectTemplate={handleRunTemplate} />
       ) : (
-        /* Primary Split-Screen Conversational + Canvas Workspace */
-        <div className="flex flex-1 min-h-0 overflow-hidden">
-          {/* Left Session & Artifact Sidebar (260px width) */}
+        /* Dynamic, Shape-Shifting Conversational + Canvas Workspace */
+        <div className="relative flex flex-1 min-h-0 overflow-hidden">
+          {/* Mobile/Tablet Backdrop Overlay when Sidebar Drawer is Open */}
           {sidebarOpen && (
-            <aside className="w-[260px] shrink-0 bg-[#111827] border-r border-white/[0.08] flex flex-col h-full select-none">
-              {/* Sidebar Search & Filter */}
-              <div className="p-3.5 border-b border-white/[0.08] space-y-2.5">
-                <div className="relative">
+            <div
+              onClick={() => setSidebarOpen(false)}
+              className="fixed inset-0 z-30 bg-black/60 backdrop-blur-xs lg:hidden"
+            />
+          )}
+
+          {/* Adaptive Session & Artifact Sidebar (Slide-over Drawer on Mobile/Tablet, Collapsible Panel on Desktop) */}
+          {sidebarOpen && (
+            <aside className="fixed lg:static inset-y-0 left-0 z-40 w-[272px] shrink-0 bg-[#111827] border-r border-white/[0.08] flex flex-col h-full select-none shadow-2xl lg:shadow-none">
+              <div className="p-3.5 border-b border-white/[0.08] flex items-center gap-2">
+                <div className="relative flex-1">
                   <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
                     value={sidebarSearch}
                     onChange={(e) => setSidebarSearch(e.target.value)}
-                    placeholder="Search sessions..."
+                    placeholder="Filter threads..."
                     className="w-full bg-[#0B0F19] border border-white/[0.08] focus:border-indigo-500/70 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none"
                   />
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setSidebarOpen(false)}
+                  className="lg:hidden p-1.5 rounded-lg text-slate-400 hover:text-white"
+                  title="Close drawer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
 
               {/* Conversation Thread List */}
@@ -797,8 +940,12 @@ export default function App() {
                     return (
                       <div
                         key={session.id}
-                        onClick={() => setActiveSessionId(session.id)}
-                        className={`group flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-xs transition-colors cursor-pointer ${
+                        onClick={() => {
+                          setActiveSessionId(session.id);
+                          setMobileWorkspacePane('chat');
+                          if (window.innerWidth < 1024) setSidebarOpen(false);
+                        }}
+                        className={`group flex items-center justify-between gap-2 px-2.5 py-2.5 rounded-lg text-xs transition-colors cursor-pointer ${
                           isActive
                             ? 'bg-indigo-600/15 text-white font-medium border border-indigo-500/30'
                             : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04] border border-transparent'
@@ -854,9 +1001,13 @@ export default function App() {
                       <button
                         key={art.id}
                         type="button"
-                        onClick={() =>
-                          setOpenCanvasId(isOpen ? null : art.id)
-                        }
+                        onClick={() => {
+                          if (isOpen && window.innerWidth >= 1024) {
+                            setOpenCanvasId(null);
+                          } else {
+                            activateCanvas(art.id);
+                          }
+                        }}
                         className={`w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-xs text-left transition-colors cursor-pointer ${
                           isOpen
                             ? 'bg-indigo-600/15 text-indigo-200 border border-indigo-500/30'
@@ -876,42 +1027,25 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Sidebar Footer Controls */}
+              {/* Sidebar Footer: Operator Attribution & Export */}
               <div className="p-3 border-t border-white/[0.08] space-y-2 bg-[#0B0F19]/40">
                 <button
                   type="button"
-                  onClick={() => setShowPersonaDrawer((v) => !v)}
-                  className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs text-slate-300 hover:text-white hover:bg-white/[0.05] transition-colors cursor-pointer"
+                  onClick={() => setIsIdentityModalOpen(true)}
+                  className="w-full flex items-center justify-between px-2.5 py-2 rounded-lg bg-[#0B0F19] border border-white/[0.07] hover:border-indigo-500/40 text-xs transition-colors cursor-pointer"
                 >
-                  <span className="inline-flex items-center gap-2">
-                    <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-400" />
-                    <span>MANBOT System Persona</span>
-                  </span>
-                  <span className="text-[11px] text-slate-500">
-                    {customInstruction ? 'Custom' : 'Default'}
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Fingerprint className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    <span className="truncate font-medium text-slate-200">
+                      {userIdentity.name}
+                    </span>
+                  </div>
+                  <span className="font-mono text-[10px] text-indigo-300 shrink-0">
+                    {userIdentity.id}
                   </span>
                 </button>
 
-                {showPersonaDrawer && (
-                  <div className="p-2.5 rounded-lg bg-[#0B0F19] border border-white/[0.08] space-y-2">
-                    <label
-                      htmlFor="custom-persona-input"
-                      className="block text-[11px] text-slate-400"
-                    >
-                      Custom Instructions for MANBOT:
-                    </label>
-                    <textarea
-                      id="custom-persona-input"
-                      rows={3}
-                      value={customInstruction}
-                      onChange={(e) => setCustomInstruction(e.target.value)}
-                      placeholder="e.g., Respond as a Principal Systems Architect. Prefer TypeScript and concise mathematical explanations."
-                      className="w-full bg-[#111827] border border-white/[0.08] rounded p-2 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 resize-none"
-                    />
-                  </div>
-                )}
-
-                <div className="flex items-center justify-between px-1 pt-1 text-[11px] text-slate-400">
+                <div className="flex items-center justify-between px-1 text-[11px] text-slate-400">
                   <button
                     type="button"
                     onClick={handleExportSession}
@@ -919,7 +1053,7 @@ export default function App() {
                     className="inline-flex items-center gap-1 hover:text-slate-200 disabled:opacity-40 transition-colors cursor-pointer"
                   >
                     <Download className="w-3 h-3" />
-                    <span>Export Markdown</span>
+                    <span>Export Thread</span>
                   </button>
                   <span className="font-mono tabular-nums">
                     {currentSession.messages.length} msgs
@@ -929,74 +1063,139 @@ export default function App() {
             </aside>
           )}
 
-          {/* Central Conversational Viewport */}
+          {/* Central Conversational Viewport (hides on mobile when viewing Canvas, or when Canvas is expanded full-screen on desktop) */}
           <main
             className={`flex flex-col h-full min-w-0 transition-all ${
-              activeCanvas ? 'w-full lg:w-1/2' : 'flex-1'
+              activeCanvas && isCanvasExpanded
+                ? 'hidden'
+                : activeCanvas
+                ? `${
+                    mobileWorkspacePane === 'canvas' ? 'hidden lg:flex' : 'flex'
+                  } w-full lg:w-1/2`
+                : 'flex flex-1'
             }`}
           >
-            {/* Workspace Contextual Sub-Toolbar */}
-            <div className="flex items-center justify-between gap-4 px-4 py-2.5 border-b border-white/[0.06] bg-[#0B0F19]/80 text-xs">
-              <div className="flex items-center gap-2.5 min-w-0">
+            {/* Dynamic Contextual Sub-Toolbar */}
+            <div className="flex items-center justify-between gap-2 px-3 sm:px-5 py-2 border-b border-white/[0.06] bg-[#0B0F19]/90 text-xs shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
                 <button
                   type="button"
                   onClick={() => setSidebarOpen((v) => !v)}
-                  title="Toggle Session Sidebar"
-                  className="p-1.5 rounded-md text-slate-400 hover:text-white hover:bg-white/[0.06] transition-colors cursor-pointer"
+                  title="Toggle Threads Drawer"
+                  className="min-h-[34px] min-w-[34px] flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.06] transition-colors cursor-pointer"
                 >
                   <PanelLeft className="w-4 h-4" />
                 </button>
-                <span className="font-medium text-slate-200 truncate">
+                <span className="font-medium text-slate-200 truncate max-w-[160px] sm:max-w-[260px]">
                   {currentSession?.title || 'Workspace'}
-                </span>
-                <span className="text-slate-600" aria-hidden="true">·</span>
-                <span className="text-slate-400 font-mono hidden sm:inline">
-                  {selectedModel === 'gemini-3.1-flash-lite' ? 'Gemini 3.1 Flash Lite' : 'Gemini 4 Flash'}
                 </span>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-1.5 shrink-0">
+                {/* Mobile/Tablet Segmented Switcher when Canvas is Open */}
+                {activeCanvas && (
+                  <div className="flex lg:hidden items-center bg-[#111827] p-0.5 rounded-lg border border-white/[0.08]">
+                    <button
+                      type="button"
+                      onClick={() => setMobileWorkspacePane('chat')}
+                      className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                        mobileWorkspacePane === 'chat'
+                          ? 'bg-indigo-600 text-white'
+                          : 'text-slate-400'
+                      }`}
+                    >
+                      Chat
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMobileWorkspacePane('canvas')}
+                      className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                        mobileWorkspacePane === 'canvas'
+                          ? 'bg-indigo-600 text-white'
+                          : 'text-slate-400'
+                      }`}
+                    >
+                      Canvas
+                    </button>
+                  </div>
+                )}
+
+                {/* User Identifier & API Attribution Button */}
+                <button
+                  type="button"
+                  onClick={() => setIsIdentityModalOpen(true)}
+                  title="Active User Identifier & API Attribution Ledger"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#111827] border border-white/[0.08] hover:border-indigo-500/40 text-xs text-slate-300 hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <Fingerprint className="w-3.5 h-3.5 text-indigo-400" />
+                  <span className="hidden sm:inline">{userIdentity.name}</span>
+                  <span className="font-mono text-[11px] text-indigo-300">
+                    {userIdentity.id}
+                  </span>
+                </button>
+
+                {/* Quota Continuation Trigger */}
+                <button
+                  type="button"
+                  onClick={() => setIsQuotaModalOpen(true)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#111827] border border-white/[0.08] text-slate-300 hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  title="Free-tier quota fallback & instant key continuation"
+                >
+                  <Zap className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="hidden md:inline">Quota</span>
+                </button>
+
+                {/* Desktop Canvas Toggle */}
                 <button
                   type="button"
                   onClick={() => {
                     if (activeCanvas) {
                       setOpenCanvasId(null);
+                      setIsCanvasExpanded(false);
                     } else {
-                      setOpenCanvasId(canvases[0]?.id || DEFAULT_CANVAS.id);
+                      activateCanvas(canvases[0]?.id || DEFAULT_CANVAS.id);
                     }
                   }}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     activeCanvas
                       ? 'bg-indigo-600/20 border-indigo-500/50 text-indigo-200'
                       : 'bg-[#111827] border-white/[0.08] text-slate-300 hover:text-white'
                   }`}
                 >
                   <Columns className="w-3.5 h-3.5" />
-                  <span>{activeCanvas ? 'Hide Canvas' : 'Open Canvas'}</span>
+                  <span>{activeCanvas ? 'Close Canvas' : 'Canvas'}</span>
                 </button>
               </div>
             </div>
 
-            {/* Scrollable Messages or Zero-State Welcome Screen */}
+            {/* Scrollable Messages or Clean Adaptive Zero-State Welcome */}
             <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-6">
               {currentSession.messages.length === 0 ? (
-                <div className="max-w-[760px] mx-auto py-6 lg:py-10 space-y-8">
+                <div className="max-w-[740px] mx-auto py-4 sm:py-10 space-y-7">
                   {/* Single Dominant Visual Anchor */}
-                  <div className="space-y-3">
-                    <p className="text-xs font-mono text-indigo-400">
-                      MANBOT MULTIMODAL WORKSPACE · GEMINI 4 ENGINE
-                    </p>
-                    <h1 className="font-display text-3xl sm:text-4xl font-semibold text-white tracking-tight">
+                  <div className="space-y-2.5">
+                    <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-indigo-400">
+                      <span>MANBOT MULTIMODAL STUDIO</span>
+                      <span aria-hidden="true">·</span>
+                      <button
+                        type="button"
+                        onClick={() => setIsIdentityModalOpen(true)}
+                        className="hover:text-indigo-300 underline underline-offset-4 cursor-pointer"
+                      >
+                        Operator: {userIdentity.name} ({userIdentity.id})
+                      </button>
+                    </div>
+                    <h1 className="font-display text-2xl sm:text-4xl font-semibold text-white tracking-tight">
                       What are we building, researching, or designing today?
                     </h1>
-                    <p className="text-sm text-slate-400 max-w-2xl leading-relaxed">
-                      Stream code and technical documents directly into the side-by-side Canvas, ground answers with live Google Search citations, analyze uploaded files, or synthesize artwork in the Image Studio.
+                    <p className="text-sm text-slate-400 max-w-xl leading-relaxed">
+                      Co-edit code and documents inside the shape-shifting Canvas, ground answers with live Google Search, or synthesize visual concepts.
                     </p>
                   </div>
 
-                  {/* Starter Capability Cards */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                    {STARTER_PROMPTS.slice(0, 4).map((item) => (
+                  {/* Adaptive 3-Card Starter Grid (Uncluttered across mobile, tablet, and desktop) */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {STARTER_PROMPTS.slice(0, 3).map((item) => (
                       <button
                         key={item.id}
                         type="button"
@@ -1004,63 +1203,29 @@ export default function App() {
                         className="group text-left p-4 rounded-xl bg-[#111827] border border-white/[0.08] hover:border-indigo-500/50 transition-colors flex flex-col justify-between space-y-3 cursor-pointer"
                       >
                         <div className="space-y-1.5">
-                          <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-start justify-between gap-2">
                             <span className="font-display text-sm font-semibold text-white group-hover:text-indigo-300 transition-colors">
                               {item.title}
                             </span>
-                            <ArrowUp className="w-3.5 h-3.5 text-slate-500 group-hover:text-indigo-400 rotate-45 transition-colors shrink-0" />
+                            <ArrowUp className="w-3.5 h-3.5 text-slate-500 group-hover:text-indigo-400 rotate-45 transition-colors shrink-0 mt-0.5" />
                           </div>
-                          <p className="text-xs text-slate-400 leading-relaxed">
+                          <p className="text-xs text-slate-400 leading-relaxed line-clamp-3">
                             {item.description}
                           </p>
                         </div>
-                        <div className="flex items-center gap-2 text-[11px] text-slate-500 font-mono">
-                          <span>{item.category}</span>
-                          <span aria-hidden="true">·</span>
-                          <span>
-                            {item.opensCanvas
-                              ? 'Opens Split Canvas'
-                              : item.useGoogleSearch
-                              ? 'Live Google Search'
-                              : `Reasoning: ${item.thinkingLevel}`}
-                          </span>
+                        <div className="text-[11px] text-slate-500 font-mono pt-1">
+                          {item.opensCanvas
+                            ? 'Split Canvas'
+                            : item.useGoogleSearch
+                            ? 'Google Search'
+                            : `Reasoning: ${item.thinkingLevel}`}
                         </div>
                       </button>
                     ))}
                   </div>
-
-                  {/* Quick Secondary Links */}
-                  <div className="flex flex-wrap items-center gap-4 pt-2 text-xs text-slate-400">
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab('image-studio')}
-                      className="inline-flex items-center gap-1.5 hover:text-indigo-300 transition-colors cursor-pointer"
-                    >
-                      <ImageIcon className="w-3.5 h-3.5 text-indigo-400" />
-                      <span>Launch AI Image Synthesis Studio</span>
-                    </button>
-                    <span aria-hidden="true">·</span>
-                    <button
-                      type="button"
-                      onClick={() => setOpenCanvasId(DEFAULT_CANVAS.id)}
-                      className="inline-flex items-center gap-1.5 hover:text-indigo-300 transition-colors cursor-pointer"
-                    >
-                      <Columns className="w-3.5 h-3.5 text-indigo-400" />
-                      <span>Preview Interactive HTML Telemetry Canvas</span>
-                    </button>
-                    <span aria-hidden="true">·</span>
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab('prompts')}
-                      className="inline-flex items-center gap-1.5 hover:text-indigo-300 transition-colors cursor-pointer"
-                    >
-                      <BookOpen className="w-3.5 h-3.5 text-indigo-400" />
-                      <span>Browse All Workflow Prompts</span>
-                    </button>
-                  </div>
                 </div>
               ) : (
-                <div className="max-w-[68ch] mx-auto space-y-6">
+                <div className="max-w-[68ch] mx-auto space-y-5">
                   {currentSession.messages.map((message) => {
                     const isUser = message.role === 'user';
                     return (
@@ -1073,10 +1238,14 @@ export default function App() {
                         }`}
                       >
                         {/* Clean Unboxed Message Metadata Header */}
-                        <div className="flex items-center justify-between text-xs text-slate-400">
-                          <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+                          <div className="flex flex-wrap items-center gap-1.5">
                             <span className="font-display font-semibold text-white">
-                              {isUser ? 'You' : 'MANBOT'}
+                              {isUser ? userIdentity.name : 'MANBOT'}
+                            </span>
+                            <span aria-hidden="true">·</span>
+                            <span className="font-mono text-[11px] text-slate-500">
+                              {isUser ? userIdentity.id : message.modelId || 'gemini-4-hydrogen'}
                             </span>
                             <span aria-hidden="true">·</span>
                             <span className="font-mono tabular-nums">
@@ -1085,14 +1254,6 @@ export default function App() {
                                 minute: '2-digit',
                               })}
                             </span>
-                            {!isUser && message.thinkingLevel && (
-                              <>
-                                <span aria-hidden="true">·</span>
-                                <span className="font-mono">
-                                  Reasoning: {message.thinkingLevel}
-                                </span>
-                              </>
-                            )}
                           </div>
                         </div>
 
@@ -1121,10 +1282,52 @@ export default function App() {
                           </div>
                         )}
 
+                        {/* Automatic High-Throughput Fallback Notice */}
+                        {message.fallbackNotice && (
+                          <div className="flex items-center gap-2 text-xs text-amber-300/90 py-1">
+                            <Zap className="w-3.5 h-3.5 shrink-0" />
+                            <span>{message.fallbackNotice}</span>
+                          </div>
+                        )}
+
                         {/* Message Body */}
                         {message.isError ? (
-                          <div className="p-3.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300 leading-relaxed">
-                            {message.text}
+                          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-200 space-y-3 leading-relaxed">
+                            <p>{message.text}</p>
+                            {message.isQuotaError && (
+                              <div className="flex flex-wrap items-center gap-2 pt-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const promptToRetry =
+                                      lastFailedPrompt ||
+                                      currentSession.messages
+                                        .slice()
+                                        .reverse()
+                                        .find((m) => m.role === 'user')?.text ||
+                                      '';
+                                    if (promptToRetry) {
+                                      sendMessage(promptToRetry, {
+                                        forceModel: 'gemini-3.1-flash-lite',
+                                        forceThinking: 'LOW',
+                                      });
+                                    }
+                                  }}
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition-colors cursor-pointer"
+                                >
+                                  <Sparkles className="w-3.5 h-3.5" />
+                                  <span>Switch to Flash-Lite &amp; Retry Instantly</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setIsQuotaModalOpen(true)}
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.14] text-slate-100 font-medium transition-colors cursor-pointer"
+                                >
+                                  <RefreshCw className="w-3.5 h-3.5" />
+                                  <span>Attach Own Key &amp; Resume in Seconds</span>
+                                </button>
+                              </div>
+                            )}
                           </div>
                         ) : isUser ? (
                           <p className="text-[15px] leading-relaxed text-slate-100 whitespace-pre-wrap">
@@ -1138,7 +1341,7 @@ export default function App() {
                         ) : (
                           <div className="flex items-center gap-2 py-3 text-xs text-slate-400">
                             <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />
-                            <span>MANBOT is thinking and synthesizing response...</span>
+                            <span>MANBOT is synthesizing response...</span>
                           </div>
                         )}
 
@@ -1149,7 +1352,7 @@ export default function App() {
                               <div className="flex items-center gap-2 text-xs text-slate-400">
                                 <Globe className="w-3.5 h-3.5 text-sky-400" />
                                 <span className="font-medium text-slate-300">
-                                  Verified Google Search Grounding Sources
+                                  Verified Google Search Sources
                                 </span>
                                 <span aria-hidden="true">·</span>
                                 <span className="font-mono tabular-nums">
@@ -1170,7 +1373,7 @@ export default function App() {
                                       rel="noopener noreferrer"
                                       className="inline-flex items-center gap-1 text-sky-400 hover:text-sky-300 underline underline-offset-4 transition-colors"
                                     >
-                                      <span className="truncate max-w-[240px]">
+                                      <span className="truncate max-w-[220px]">
                                         {src.title}
                                       </span>
                                       <ExternalLink className="w-3 h-3 shrink-0" />
@@ -1188,9 +1391,89 @@ export default function App() {
               )}
             </div>
 
-            {/* Multimodal Prompt Composer Tray */}
-            <div className="px-4 sm:px-6 pb-4 pt-2 bg-[#0B0F19]">
-              <div className="max-w-[760px] mx-auto rounded-xl bg-[#111827] border border-white/[0.1] focus-within:border-indigo-500/80 focus-within:shadow-[0_0_25px_-5px_rgba(99,102,241,0.25)] transition-all p-3 space-y-2.5">
+            {/* Streamlined Shape-Shifting Multimodal Composer Tray */}
+            <div className="px-3 sm:px-6 pb-3 sm:pb-4 pt-1.5 bg-[#0B0F19] shrink-0">
+              <div className="relative max-w-[740px] mx-auto rounded-2xl bg-[#111827] border border-white/[0.1] focus-within:border-indigo-500/80 focus-within:shadow-[0_0_25px_-5px_rgba(99,102,241,0.25)] transition-all p-3 space-y-2">
+                {/* Floating Engine & Persona Popover (keeps default composer bar clean and uncluttered) */}
+                {showEnginePopover && (
+                  <div className="absolute bottom-full left-0 mb-2 w-full sm:w-80 rounded-xl bg-[#111827] border border-white/[0.14] shadow-2xl p-4 space-y-3.5 z-30 text-xs">
+                    <div className="flex items-center justify-between border-b border-white/[0.08] pb-2">
+                      <span className="font-display font-semibold text-white">
+                        MANBOT Engine &amp; Persona
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShowEnginePopover(false)}
+                        className="text-slate-400 hover:text-white cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="block text-slate-400">Active Gemini Model</label>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedModel('gemini-4-hydrogen')}
+                          className={`px-2.5 py-1.5 rounded-lg font-mono text-[11px] border transition-colors cursor-pointer ${
+                            selectedModel === 'gemini-4-hydrogen'
+                              ? 'bg-indigo-600/20 border-indigo-500 text-white'
+                              : 'bg-[#0B0F19] border-white/[0.08] text-slate-400'
+                          }`}
+                        >
+                          4-hydrogen (Flash)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedModel('gemini-3.1-flash-lite')}
+                          className={`px-2.5 py-1.5 rounded-lg font-mono text-[11px] border transition-colors cursor-pointer ${
+                            selectedModel === 'gemini-3.1-flash-lite'
+                              ? 'bg-indigo-600/20 border-indigo-500 text-white'
+                              : 'bg-[#0B0F19] border-white/[0.08] text-slate-400'
+                          }`}
+                        >
+                          3.1-flash-lite
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="block text-slate-400">Reasoning Depth</label>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {(['LOW', 'HIGH', 'XHIGH'] as ReasoningLevel[]).map((lvl) => (
+                          <button
+                            key={lvl}
+                            type="button"
+                            onClick={() => setThinkingLevel(lvl)}
+                            className={`px-2.5 py-1.5 rounded-lg font-mono text-[11px] border transition-colors cursor-pointer ${
+                              thinkingLevel === lvl
+                                ? 'bg-indigo-600/20 border-indigo-500 text-white'
+                                : 'bg-[#0B0F19] border-white/[0.08] text-slate-400'
+                            }`}
+                          >
+                            {lvl}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label htmlFor="persona-popover-input" className="block text-slate-400">
+                        Custom System Instructions
+                      </label>
+                      <textarea
+                        id="persona-popover-input"
+                        rows={2}
+                        value={customInstruction}
+                        onChange={(e) => setCustomInstruction(e.target.value)}
+                        placeholder="e.g., Respond as a Principal Systems Architect..."
+                        className="w-full bg-[#0B0F19] border border-white/[0.08] rounded-lg p-2 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 resize-none"
+                      />
+                    </div>
+                  </div>
+                )}
+
                 {/* Pending Attachments Preview Strip */}
                 {attachments.length > 0 && (
                   <div className="flex flex-wrap gap-2 pb-2 border-b border-white/[0.07]">
@@ -1204,12 +1487,12 @@ export default function App() {
                             src={att.previewUrl}
                             alt={att.name}
                             referrerPolicy="no-referrer"
-                            className="w-8 h-8 rounded object-cover"
+                            className="w-7 h-7 rounded object-cover"
                           />
                         ) : (
                           <FileText className="w-4 h-4 text-indigo-400 ml-1" />
                         )}
-                        <span className="text-slate-200 truncate max-w-[150px]">
+                        <span className="text-slate-200 truncate max-w-[140px]">
                           {att.name}
                         </span>
                         <button
@@ -1239,13 +1522,13 @@ export default function App() {
                       sendMessage();
                     }
                   }}
-                  placeholder="Ask MANBOT anything, attach images/files, or ask to draft code & docs in the Canvas..."
+                  placeholder="Ask MANBOT anything, attach files, or draft in Canvas..."
                   className="w-full bg-transparent text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none resize-none leading-relaxed"
                 />
 
-                {/* Bottom Controls Bar */}
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-white/[0.06]">
-                  <div className="flex flex-wrap items-center gap-1.5">
+                {/* Minimalist 3-Control Bottom Action Row */}
+                <div className="flex items-center justify-between gap-2 pt-1 border-t border-white/[0.06]">
+                  <div className="flex items-center gap-1.5 overflow-x-auto">
                     <input
                       ref={fileInputRef}
                       type="file"
@@ -1261,10 +1544,10 @@ export default function App() {
                       className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-300 hover:text-white bg-[#0B0F19] hover:bg-white/[0.06] border border-white/[0.07] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                     >
                       <Paperclip className="w-3.5 h-3.5 text-slate-400" />
-                      <span>Attach</span>
+                      <span className="hidden sm:inline">Attach</span>
                     </button>
 
-                    {/* Live Google Search Grounding Toggle */}
+                    {/* Live Google Search Toggle */}
                     <button
                       type="button"
                       onClick={() => setUseGoogleSearch((v) => !v)}
@@ -1275,48 +1558,26 @@ export default function App() {
                       }`}
                     >
                       <Globe className="w-3.5 h-3.5" />
-                      <span>Google Search</span>
+                      <span>Search</span>
                     </button>
 
-                    {/* Reasoning Depth Selector */}
-                    <div className="inline-flex items-center gap-1 bg-[#0B0F19] border border-white/[0.07] rounded-lg px-2 py-1 text-xs">
-                      <BrainCircuit className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                      <select
-                        value={thinkingLevel}
-                        onChange={(e) =>
-                          setThinkingLevel(e.target.value as ReasoningLevel)
-                        }
-                        aria-label="Reasoning level"
-                        className="bg-transparent text-slate-300 font-medium focus:outline-none cursor-pointer"
-                      >
-                        <option value="LOW" className="bg-[#111827]">
-                          Reasoning: Low (Fast)
-                        </option>
-                        <option value="HIGH" className="bg-[#111827]">
-                          Reasoning: High
-                        </option>
-                        <option value="XHIGH" className="bg-[#111827]">
-                          Reasoning: Max (XHIGH)
-                        </option>
-                      </select>
-                    </div>
-
-                    {/* Model Selector */}
-                    <select
-                      value={selectedModel}
-                      onChange={(e) =>
-                        setSelectedModel(e.target.value as ModelOptionId)
-                      }
-                      aria-label="Select Gemini model"
-                      className="bg-[#0B0F19] border border-white/[0.07] rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-300 focus:outline-none cursor-pointer"
+                    {/* Consolidated Engine & Reasoning Popover Trigger */}
+                    <button
+                      type="button"
+                      onClick={() => setShowEnginePopover((v) => !v)}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-mono border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        showEnginePopover
+                          ? 'bg-indigo-600/20 border-indigo-500/50 text-indigo-200'
+                          : 'bg-[#0B0F19] border-white/[0.07] text-slate-300 hover:text-white'
+                      }`}
                     >
-                      <option value="gemini-4-hydrogen" className="bg-[#111827]">
-                        gemini-4-hydrogen (Flash)
-                      </option>
-                      <option value="gemini-3.1-flash-lite" className="bg-[#111827]">
-                        gemini-3.1-flash-lite (Lite)
-                      </option>
-                    </select>
+                      <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>
+                        {selectedModel === 'gemini-3.1-flash-lite'
+                          ? 'Lite'
+                          : `Flash · ${thinkingLevel}`}
+                      </span>
+                    </button>
                   </div>
 
                   <button
@@ -1335,7 +1596,6 @@ export default function App() {
                       </>
                     ) : (
                       <>
-                        <Sparkles className="w-3.5 h-3.5" />
                         <span>Send</span>
                         <ArrowUp className="w-3.5 h-3.5" />
                       </>
@@ -1346,18 +1606,137 @@ export default function App() {
             </div>
           </main>
 
-          {/* Right Split-Screen Interactive Canvas Pane (50% width when open) */}
+          {/* Right Split-Screen or Full-Width Interactive Canvas Pane */}
           {activeCanvas && (
-            <div className="w-full lg:w-1/2 h-full shrink-0">
-              <CanvasPane
-                artifact={activeCanvas}
-                onUpdateArtifact={handleUpdateCanvas}
-                onClose={() => setOpenCanvasId(null)}
-              />
+            <div
+              className={`h-full shrink-0 transition-all ${
+                isCanvasExpanded
+                  ? 'w-full flex flex-col'
+                  : `${
+                      mobileWorkspacePane === 'canvas' ? 'flex flex-col w-full' : 'hidden lg:flex lg:flex-col'
+                    } lg:w-1/2`
+              }`}
+            >
+              {/* Mobile Back-to-Chat Bar inside Canvas view */}
+              <div className="flex lg:hidden items-center justify-between px-3.5 py-2 border-b border-white/[0.08] bg-[#0B0F19] text-xs">
+                <button
+                  type="button"
+                  onClick={() => setMobileWorkspacePane('chat')}
+                  className="inline-flex items-center gap-1.5 text-indigo-400 font-medium cursor-pointer"
+                >
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  <span>Back to Chat Thread</span>
+                </button>
+                <span className="font-mono text-[11px] text-slate-400">
+                  Split Canvas Mode
+                </span>
+              </div>
+
+              <div className="flex-1 min-h-0">
+                <CanvasPane
+                  artifact={activeCanvas}
+                  userIdentity={userIdentity}
+                  isExpanded={isCanvasExpanded}
+                  onToggleExpand={() => setIsCanvasExpanded((v) => !v)}
+                  onUpdateArtifact={handleUpdateCanvas}
+                  onClose={() => {
+                    setOpenCanvasId(null);
+                    setIsCanvasExpanded(false);
+                    setMobileWorkspacePane('chat');
+                  }}
+                />
+              </div>
             </div>
           )}
         </div>
       )}
+
+      {/* Ergonomic Mobile Bottom Navigation Dock (< 768px) */}
+      <nav className="md:hidden grid grid-cols-4 items-center h-14 border-t border-white/[0.08] bg-[#0B0F19]/95 backdrop-blur-md shrink-0 z-30">
+        <button
+          type="button"
+          onClick={() => setActiveTab('workspace')}
+          className={`flex flex-col items-center justify-center h-full gap-0.5 text-[10px] font-medium transition-colors cursor-pointer ${
+            activeTab === 'workspace' ? 'text-indigo-400' : 'text-slate-400'
+          }`}
+        >
+          <MessageSquare className="w-4 h-4" />
+          <span>Workspace</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('image-studio')}
+          className={`flex flex-col items-center justify-center h-full gap-0.5 text-[10px] font-medium transition-colors cursor-pointer ${
+            activeTab === 'image-studio' ? 'text-indigo-400' : 'text-slate-400'
+          }`}
+        >
+          <ImageIcon className="w-4 h-4" />
+          <span>Studio</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('canvases')}
+          className={`flex flex-col items-center justify-center h-full gap-0.5 text-[10px] font-medium transition-colors cursor-pointer ${
+            activeTab === 'canvases' ? 'text-indigo-400' : 'text-slate-400'
+          }`}
+        >
+          <FileCode2 className="w-4 h-4" />
+          <span>Canvases</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('prompts')}
+          className={`flex flex-col items-center justify-center h-full gap-0.5 text-[10px] font-medium transition-colors cursor-pointer ${
+            activeTab === 'prompts' ? 'text-indigo-400' : 'text-slate-400'
+          }`}
+        >
+          <BookOpen className="w-4 h-4" />
+          <span>Prompts</span>
+        </button>
+      </nav>
+
+      {/* User Identifier & API Attribution Ledger Modal */}
+      <UserIdentityModal
+        isOpen={isIdentityModalOpen}
+        onClose={() => setIsIdentityModalOpen(false)}
+        userIdentity={userIdentity}
+        onUpdateIdentity={setUserIdentity}
+      />
+
+      {/* Instant Quota Recovery & Zero-Setup Continuation Modal */}
+      <QuotaRecoveryModal
+        isOpen={isQuotaModalOpen}
+        onClose={() => setIsQuotaModalOpen(false)}
+        onSwitchToFlashLiteAndRetry={() => {
+          const promptToRetry =
+            lastFailedPrompt ||
+            currentSession.messages
+              .slice()
+              .reverse()
+              .find((m) => m.role === 'user')?.text ||
+            '';
+          setSelectedModel('gemini-3.1-flash-lite');
+          setThinkingLevel('LOW');
+          if (promptToRetry) {
+            sendMessage(promptToRetry, {
+              forceModel: 'gemini-3.1-flash-lite',
+              forceThinking: 'LOW',
+            });
+          }
+        }}
+        onRetryAfterKeyUpdate={() => {
+          const promptToRetry =
+            lastFailedPrompt ||
+            currentSession.messages
+              .slice()
+              .reverse()
+              .find((m) => m.role === 'user')?.text ||
+            '';
+          if (promptToRetry) {
+            sendMessage(promptToRetry);
+          }
+        }}
+      />
     </div>
   );
 }
