@@ -3,12 +3,13 @@ import {
   Activity,
   Fingerprint,
   Lock,
+  Receipt,
   RefreshCw,
   ShieldCheck,
   Sparkles,
   X,
 } from 'lucide-react';
-import { ApiUsageRecord, UserIdentity } from '../types';
+import { ApiUsageRecord, PaymentReceipt, UserIdentity } from '../types';
 
 interface UserIdentityModalProps {
   isOpen: boolean;
@@ -24,6 +25,7 @@ export const UserIdentityModal: React.FC<UserIdentityModalProps> = ({
   onOpenQuotaUpgrade,
 }) => {
   const [usageRecords, setUsageRecords] = useState<ApiUsageRecord[]>([]);
+  const [receipts, setReceipts] = useState<PaymentReceipt[]>([]);
   const [totalCalls, setTotalCalls] = useState(0);
   const [loadingUsage, setLoadingUsage] = useState(false);
 
@@ -34,6 +36,7 @@ export const UserIdentityModal: React.FC<UserIdentityModalProps> = ({
       if (res.ok) {
         const data = await res.json();
         setUsageRecords(data.operators || []);
+        setReceipts(data.receipts || []);
         setTotalCalls(data.totalApiCalls || 0);
       }
     } catch {
@@ -47,7 +50,7 @@ export const UserIdentityModal: React.FC<UserIdentityModalProps> = ({
     if (isOpen) {
       fetchUsageLedger();
     }
-  }, [isOpen, userIdentity.quotaUsed, userIdentity.tier]);
+  }, [isOpen, userIdentity.quotaUsed, userIdentity.quotaLimit, userIdentity.tier]);
 
   if (!isOpen) return null;
 
@@ -67,7 +70,7 @@ export const UserIdentityModal: React.FC<UserIdentityModalProps> = ({
           <div className="flex items-center gap-2.5">
             <Fingerprint className="w-4 h-4 text-indigo-400 shrink-0" />
             <h2 className="font-display text-base font-semibold text-white">
-              Locked Operator Identity &amp; API Ledger
+              Locked Operator Identity &amp; Billing Ledger
             </h2>
           </div>
           <button
@@ -96,7 +99,7 @@ export const UserIdentityModal: React.FC<UserIdentityModalProps> = ({
             </div>
 
             <p className="text-slate-400 leading-relaxed">
-              This identifier is cryptographically derived and signed by the MANBOT server using your browser and device telemetry. It is strictly read-only and cannot be altered or spoofed by any user.
+              This identifier is cryptographically derived and signed by the MANBOT server using your browser and device telemetry. It is strictly read-only and cannot be altered or spoofed.
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 font-mono tabular-nums">
@@ -115,14 +118,14 @@ export const UserIdentityModal: React.FC<UserIdentityModalProps> = ({
               </div>
 
               <div className="p-3 rounded-lg bg-[#111827] border border-white/[0.06] space-y-1">
-                <div className="text-[10px] text-slate-500 font-sans">Active In-App Tier</div>
+                <div className="text-[10px] text-slate-500 font-sans">Active Paid / Free Tier</div>
                 <div className="text-xs font-semibold text-white">
                   {userIdentity.tier}
                 </div>
               </div>
 
               <div className="p-3 rounded-lg bg-[#111827] border border-white/[0.06] space-y-1">
-                <div className="text-[10px] text-slate-500 font-sans">Remaining API Quota</div>
+                <div className="text-[10px] text-slate-500 font-sans">Remaining API Credits</div>
                 <div className="text-xs text-emerald-300">
                   {userIdentity.quotaLimit >= 999999
                     ? 'Unlimited Calls'
@@ -144,7 +147,7 @@ export const UserIdentityModal: React.FC<UserIdentityModalProps> = ({
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white transition-colors cursor-pointer"
               >
                 <Sparkles className="w-3.5 h-3.5" />
-                <span>Upgrade In-App Quota Pass</span>
+                <span>Purchase API Credits</span>
               </button>
             </div>
           </div>
@@ -219,6 +222,46 @@ export const UserIdentityModal: React.FC<UserIdentityModalProps> = ({
                     })}
                   </tbody>
                 </table>
+              </div>
+            )}
+          </div>
+
+          {/* Verified Payment Receipts Ledger */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Receipt className="w-4 h-4 text-emerald-400" />
+              <span className="font-display text-sm font-semibold text-white">
+                Verified Payment Receipts
+              </span>
+            </div>
+
+            {receipts.length === 0 ? (
+              <div className="p-3.5 rounded-xl bg-[#0B0F19] border border-white/[0.06] text-slate-400 text-center">
+                No paid credit transactions recorded yet. High-credit upgrades require verified in-app payment.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {receipts.map((r) => (
+                  <div
+                    key={r.receiptId}
+                    className="p-3 rounded-xl bg-[#0B0F19] border border-white/[0.08] flex flex-wrap items-center justify-between gap-2 font-mono text-xs"
+                  >
+                    <div>
+                      <div className="text-white font-semibold">
+                        {r.receiptId} · <span className="font-sans text-indigo-300">{r.planName}</span>
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        Operator: {r.operatorId} · {r.paymentMethodSummary} · Sig: {r.receiptSignature}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-emerald-400 font-bold">{r.amountFormatted}</div>
+                      <div className="text-[10px] text-slate-500">
+                        {new Date(r.paidAt).toLocaleTimeString()}
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>

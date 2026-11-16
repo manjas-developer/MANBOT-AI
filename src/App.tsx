@@ -91,6 +91,7 @@ function getOrCreateInitialIdentity(): UserIdentity {
       if (parsed?.id && parsed?.fingerprintHash && parsed?.signature) {
         return {
           ...parsed,
+          emergencyRefillUsed: Boolean(parsed.emergencyRefillUsed),
           deviceLabel: detectDeviceLabel(),
         };
       }
@@ -105,7 +106,8 @@ function getOrCreateInitialIdentity(): UserIdentity {
     deviceLabel: detectDeviceLabel(),
     tier: 'Starter Free',
     quotaUsed: 0,
-    quotaLimit: 25,
+    quotaLimit: 10,
+    emergencyRefillUsed: false,
     issuedAt: new Date().toISOString(),
   };
 }

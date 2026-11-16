@@ -84,7 +84,27 @@ export interface PromptTemplate {
   opensCanvas?: boolean;
 }
 
-export type OperatorTier = 'Starter Free' | 'Pro Studio' | 'Unlimited Enterprise';
+export type OperatorTier =
+  | 'Starter Free'
+  | 'Starter Pack'
+  | 'Pro Studio'
+  | 'Unlimited Enterprise';
+
+export type PaymentPlanId = 'starter_pack' | 'pro_studio' | 'unlimited_enterprise';
+
+export interface PaymentReceipt {
+  receiptId: string;
+  paymentIntentId: string;
+  operatorId: string;
+  planId: PaymentPlanId;
+  planName: string;
+  amountFormatted: string;
+  amountCents: number;
+  paymentMethodSummary: string;
+  creditsGranted: number;
+  paidAt: string;
+  receiptSignature: string;
+}
 
 export interface UserIdentity {
   id: string;
@@ -94,6 +114,7 @@ export interface UserIdentity {
   tier: OperatorTier;
   quotaUsed: number;
   quotaLimit: number;
+  emergencyRefillUsed: boolean;
   issuedAt: string;
 }
 
@@ -104,12 +125,12 @@ export interface ApiUsageRecord {
   tier: OperatorTier;
   quotaUsed: number;
   quotaLimit: number;
+  emergencyRefillUsed: boolean;
   totalRequests: number;
   chatRequests: number;
   canvasRequests: number;
   imageRequests: number;
+  totalPaidCents: number;
   lastModel: string;
   lastActiveAt: string;
 }
-
-
