@@ -67,15 +67,30 @@ function detectDeviceLabel(): string {
   return 'Desktop Studio';
 }
 
+function getBrowserHardwareSeed(): string {
+  if (typeof window === 'undefined') return 'server-seed';
+  const nav = window.navigator;
+  const scr = window.screen;
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  return [
+    nav.userAgent,
+    nav.language,
+    nav.hardwareConcurrency || 4,
+    scr?.width || 1440,
+    scr?.height || 900,
+    scr?.colorDepth || 24,
+    tz,
+  ].join('|');
+}
+
 function getOrCreateInitialIdentity(): UserIdentity {
   try {
     const saved = localStorage.getItem(STORAGE_KEYS.IDENTITY);
     if (saved) {
       const parsed = JSON.parse(saved);
-      if (parsed?.id && parsed?.name) {
+      if (parsed?.id && parsed?.fingerprintHash && parsed?.signature) {
         return {
-          id: parsed.id,
-          name: parsed.name,
+          ...parsed,
           deviceLabel: detectDeviceLabel(),
         };
       }
@@ -83,11 +98,15 @@ function getOrCreateInitialIdentity(): UserIdentity {
   } catch {
     // ignore storage errors
   }
-  const randomSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
   return {
-    id: `USR-${randomSuffix}`,
-    name: 'Primary Operator',
+    id: 'OP-VERIFYING',
+    fingerprintHash: 'SHA256:PENDING',
+    signature: 'verifying',
     deviceLabel: detectDeviceLabel(),
+    tier: 'Starter Free',
+    quotaUsed: 0,
+    quotaLimit: 25,
+    issuedAt: new Date().toISOString(),
   };
 }
 
@@ -329,8 +348,27 @@ export default function App() {
     }
   }, [userIdentity]);
 
-  // Dynamically update device label on resize
+  // Fetch & verify immutable server-signed Operator Identity on mount
   useEffect(() => {
+    let active = true;
+    fetch('/api/identity/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientSeed: getBrowserHardwareSeed(),
+        deviceLabel: detectDeviceLabel(),
+      }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (active && data?.identity) {
+          setUserIdentity(data.identity);
+        }
+      })
+      .catch(() => {
+        // ignore network error on boot
+      });
+
     const handleResize = () => {
       const nextLabel = detectDeviceLabel();
       setUserIdentity((prev) =>
@@ -338,7 +376,10 @@ export default function App() {
       );
     };
     window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+    return () => {
+      active = false;
+      window.removeEventListener('resize', handleResize);
+    };
   }, []);
 
   const currentSession =
@@ -611,7 +652,20 @@ export default function App() {
 
           try {
             const payload = JSON.parse(dataLine.slice(6));
-            if (payload.type === 'chunk' && typeof payload.text === 'string') {
+            if (payload.type === 'quota_sync') {
+              setUserIdentity((prev) => ({
+                ...prev,
+                quotaUsed:
+                  typeof payload.quotaUsed === 'number'
+                    ? payload.quotaUsed
+                    : prev.quotaUsed,
+                quotaLimit:
+                  typeof payload.quotaLimit === 'number'
+                    ? payload.quotaLimit
+                    : prev.quotaLimit,
+                tier: payload.tier || prev.tier,
+              }));
+            } else if (payload.type === 'chunk' && typeof payload.text === 'string') {
               accumulatedText += payload.text;
               setSessions((prev) =>
                 prev.map((s) =>
@@ -736,12 +790,12 @@ export default function App() {
     if (!currentSession) return;
     const mdLines = [
       `# ${currentSession.title}`,
-      `Exported from MANBOT · Operator: ${userIdentity.name} (${userIdentity.id}) · ${new Date().toLocaleString()}`,
+      `Exported from MANBOT · Locked Operator ID: ${userIdentity.id} (${userIdentity.tier}) · ${new Date().toLocaleString()}`,
       '',
     ];
     currentSession.messages.forEach((m) => {
       mdLines.push(
-        `### ${m.role === 'user' ? `${userIdentity.name} (${userIdentity.id})` : 'MANBOT'} (${new Date(
+        `### ${m.role === 'user' ? `Operator ${userIdentity.id}` : 'MANBOT'} (${new Date(
           m.timestamp
         ).toLocaleTimeString()})`
       );
@@ -1036,12 +1090,12 @@ export default function App() {
                 >
                   <div className="flex items-center gap-2 min-w-0">
                     <Fingerprint className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                    <span className="truncate font-medium text-slate-200">
-                      {userIdentity.name}
+                    <span className="truncate font-mono font-medium text-slate-200">
+                      {userIdentity.id}
                     </span>
                   </div>
-                  <span className="font-mono text-[10px] text-indigo-300 shrink-0">
-                    {userIdentity.id}
+                  <span className="text-[10px] text-indigo-300 shrink-0">
+                    {userIdentity.tier}
                   </span>
                 </button>
 
@@ -1120,29 +1174,35 @@ export default function App() {
                   </div>
                 )}
 
-                {/* User Identifier & API Attribution Button */}
+                {/* Locked Operator Identifier & API Attribution Button */}
                 <button
                   type="button"
                   onClick={() => setIsIdentityModalOpen(true)}
-                  title="Active User Identifier & API Attribution Ledger"
+                  title="Locked Operator Identifier & API Attribution Ledger"
                   className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#111827] border border-white/[0.08] hover:border-indigo-500/40 text-xs text-slate-300 hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   <Fingerprint className="w-3.5 h-3.5 text-indigo-400" />
-                  <span className="hidden sm:inline">{userIdentity.name}</span>
                   <span className="font-mono text-[11px] text-indigo-300">
                     {userIdentity.id}
                   </span>
+                  <span className="hidden sm:inline text-[11px] text-slate-400">
+                    · {userIdentity.tier}
+                  </span>
                 </button>
 
-                {/* Quota Continuation Trigger */}
+                {/* In-App Quota & Instant Pass Upgrade Trigger */}
                 <button
                   type="button"
                   onClick={() => setIsQuotaModalOpen(true)}
                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#111827] border border-white/[0.08] text-slate-300 hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                  title="Free-tier quota fallback & instant key continuation"
+                  title="In-App API Quota & Instant Pass Upgrade"
                 >
                   <Zap className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="hidden md:inline">Quota</span>
+                  <span className="font-mono text-[11px] tabular-nums">
+                    {userIdentity.quotaLimit >= 999999
+                      ? '∞'
+                      : `${Math.max(0, userIdentity.quotaLimit - userIdentity.quotaUsed)} left`}
+                  </span>
                 </button>
 
                 {/* Desktop Canvas Toggle */}
@@ -1182,7 +1242,7 @@ export default function App() {
                         onClick={() => setIsIdentityModalOpen(true)}
                         className="hover:text-indigo-300 underline underline-offset-4 cursor-pointer"
                       >
-                        Operator: {userIdentity.name} ({userIdentity.id})
+                        Locked ID: {userIdentity.id} · {userIdentity.tier}
                       </button>
                     </div>
                     <h1 className="font-display text-2xl sm:text-4xl font-semibold text-white tracking-tight">
@@ -1241,7 +1301,7 @@ export default function App() {
                         <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
                           <div className="flex flex-wrap items-center gap-1.5">
                             <span className="font-display font-semibold text-white">
-                              {isUser ? userIdentity.name : 'MANBOT'}
+                              {isUser ? 'Operator' : 'MANBOT'}
                             </span>
                             <span aria-hidden="true">·</span>
                             <span className="font-mono text-[11px] text-slate-500">
@@ -1324,7 +1384,7 @@ export default function App() {
                                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.14] text-slate-100 font-medium transition-colors cursor-pointer"
                                 >
                                   <RefreshCw className="w-3.5 h-3.5" />
-                                  <span>Attach Own Key &amp; Resume in Seconds</span>
+                                  <span>Activate In-App Quota Pass Instantly</span>
                                 </button>
                               </div>
                             )}
@@ -1695,18 +1755,20 @@ export default function App() {
         </button>
       </nav>
 
-      {/* User Identifier & API Attribution Ledger Modal */}
+      {/* Locked Operator Identifier & API Attribution Ledger Modal */}
       <UserIdentityModal
         isOpen={isIdentityModalOpen}
         onClose={() => setIsIdentityModalOpen(false)}
         userIdentity={userIdentity}
-        onUpdateIdentity={setUserIdentity}
+        onOpenQuotaUpgrade={() => setIsQuotaModalOpen(true)}
       />
 
-      {/* Instant Quota Recovery & Zero-Setup Continuation Modal */}
+      {/* In-App Instant Quota & Pass Provisioning Modal */}
       <QuotaRecoveryModal
         isOpen={isQuotaModalOpen}
         onClose={() => setIsQuotaModalOpen(false)}
+        userIdentity={userIdentity}
+        onIdentityUpgraded={(updated) => setUserIdentity(updated)}
         onSwitchToFlashLiteAndRetry={() => {
           const promptToRetry =
             lastFailedPrompt ||

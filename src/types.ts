@@ -84,16 +84,26 @@ export interface PromptTemplate {
   opensCanvas?: boolean;
 }
 
+export type OperatorTier = 'Starter Free' | 'Pro Studio' | 'Unlimited Enterprise';
+
 export interface UserIdentity {
   id: string;
-  name: string;
+  fingerprintHash: string;
+  signature: string;
   deviceLabel: string;
+  tier: OperatorTier;
+  quotaUsed: number;
+  quotaLimit: number;
+  issuedAt: string;
 }
 
 export interface ApiUsageRecord {
   userId: string;
-  userName: string;
+  fingerprintHash: string;
   deviceLabel: string;
+  tier: OperatorTier;
+  quotaUsed: number;
+  quotaLimit: number;
   totalRequests: number;
   chatRequests: number;
   canvasRequests: number;
@@ -101,4 +111,5 @@ export interface ApiUsageRecord {
   lastModel: string;
   lastActiveAt: string;
 }
+
 

@@ -1,26 +1,31 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, Check, Fingerprint, RefreshCw, UserCheck, X } from 'lucide-react';
+import {
+  Activity,
+  Fingerprint,
+  Lock,
+  RefreshCw,
+  ShieldCheck,
+  Sparkles,
+  X,
+} from 'lucide-react';
 import { ApiUsageRecord, UserIdentity } from '../types';
 
 interface UserIdentityModalProps {
   isOpen: boolean;
   onClose: () => void;
   userIdentity: UserIdentity;
-  onUpdateIdentity: (updated: UserIdentity) => void;
+  onOpenQuotaUpgrade: () => void;
 }
 
 export const UserIdentityModal: React.FC<UserIdentityModalProps> = ({
   isOpen,
   onClose,
   userIdentity,
-  onUpdateIdentity,
+  onOpenQuotaUpgrade,
 }) => {
-  const [nameInput, setNameInput] = useState(userIdentity.name);
-  const [idInput, setIdInput] = useState(userIdentity.id);
   const [usageRecords, setUsageRecords] = useState<ApiUsageRecord[]>([]);
   const [totalCalls, setTotalCalls] = useState(0);
   const [loadingUsage, setLoadingUsage] = useState(false);
-  const [savedNotice, setSavedNotice] = useState(false);
 
   const fetchUsageLedger = async () => {
     setLoadingUsage(true);
@@ -40,34 +45,13 @@ export const UserIdentityModal: React.FC<UserIdentityModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      setNameInput(userIdentity.name);
-      setIdInput(userIdentity.id);
       fetchUsageLedger();
     }
-  }, [isOpen, userIdentity.id, userIdentity.name]);
+  }, [isOpen, userIdentity.quotaUsed, userIdentity.tier]);
 
   if (!isOpen) return null;
 
-  const handleSave = (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleanedName = nameInput.trim() || 'Operator';
-    const cleanedId =
-      idInput.trim().toUpperCase().replace(/[^A-Z0-9-_]/g, '') ||
-      userIdentity.id;
-
-    onUpdateIdentity({
-      ...userIdentity,
-      name: cleanedName,
-      id: cleanedId,
-    });
-    setSavedNotice(true);
-    setTimeout(() => setSavedNotice(false), 1800);
-  };
-
-  const handleGenerateNewId = () => {
-    const randomCode = Math.random().toString(36).substring(2, 6).toUpperCase();
-    setIdInput(`USR-${randomCode}`);
-  };
+  const remainingQuota = Math.max(0, userIdentity.quotaLimit - userIdentity.quotaUsed);
 
   return (
     <div
@@ -83,7 +67,7 @@ export const UserIdentityModal: React.FC<UserIdentityModalProps> = ({
           <div className="flex items-center gap-2.5">
             <Fingerprint className="w-4 h-4 text-indigo-400 shrink-0" />
             <h2 className="font-display text-base font-semibold text-white">
-              User Identifier &amp; API Attribution Ledger
+              Locked Operator Identity &amp; API Ledger
             </h2>
           </div>
           <button
@@ -96,88 +80,86 @@ export const UserIdentityModal: React.FC<UserIdentityModalProps> = ({
         </div>
 
         <div className="p-5 overflow-y-auto space-y-6 text-xs">
-          {/* Active Operator Identity Form */}
-          <form onSubmit={handleSave} className="space-y-4">
-            <div className="flex items-center justify-between">
-              <span className="font-display text-sm font-semibold text-white">
-                Active Operator Identity
-              </span>
-              <span className="font-mono text-[11px] text-slate-400">
-                Device: {userIdentity.deviceLabel}
+          {/* Immutable Cryptographic Identity Card (Read-Only, Non-Editable) */}
+          <div className="p-4 rounded-xl bg-[#0B0F19] border border-white/[0.08] space-y-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Lock className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="font-display text-sm font-semibold text-white">
+                  Immutable Hardware-Bound Identifier
+                </span>
+              </div>
+              <span className="inline-flex items-center gap-1 text-[11px] font-mono text-emerald-400">
+                <ShieldCheck className="w-3.5 h-3.5" />
+                HMAC-SHA256 Verified
               </span>
             </div>
 
             <p className="text-slate-400 leading-relaxed">
-              Every chat stream, Canvas refinement, and Image Studio synthesis is tagged with your User Identifier so you can track who is consuming API quota across sessions and devices.
+              This identifier is cryptographically derived and signed by the MANBOT server using your browser and device telemetry. It is strictly read-only and cannot be altered or spoofed by any user.
             </p>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <label htmlFor="operator-name" className="block text-slate-300 font-medium">
-                  Display Name / Handle
-                </label>
-                <input
-                  id="operator-name"
-                  type="text"
-                  value={nameInput}
-                  onChange={(e) => setNameInput(e.target.value)}
-                  placeholder="e.g., Manjas Anand"
-                  className="w-full rounded-lg bg-[#0B0F19] border border-white/[0.1] focus:border-indigo-500 px-3 py-2 text-xs text-white focus:outline-none"
-                />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 font-mono tabular-nums">
+              <div className="p-3 rounded-lg bg-[#111827] border border-white/[0.06] space-y-1">
+                <div className="text-[10px] text-slate-500 font-sans">Locked Operator ID</div>
+                <div className="text-sm font-semibold text-indigo-300 select-all">
+                  {userIdentity.id}
+                </div>
               </div>
 
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <label htmlFor="operator-id" className="block text-slate-300 font-medium">
-                    Unique User ID Tag
-                  </label>
-                  <button
-                    type="button"
-                    onClick={handleGenerateNewId}
-                    className="text-[11px] text-indigo-400 hover:text-indigo-300 cursor-pointer"
-                  >
-                    Cycle ID
-                  </button>
+              <div className="p-3 rounded-lg bg-[#111827] border border-white/[0.06] space-y-1">
+                <div className="text-[10px] text-slate-500 font-sans">Device Fingerprint Hash</div>
+                <div className="text-xs text-slate-200 truncate select-all">
+                  {userIdentity.fingerprintHash}
                 </div>
-                <input
-                  id="operator-id"
-                  type="text"
-                  value={idInput}
-                  onChange={(e) => setIdInput(e.target.value)}
-                  placeholder="USR-XXXX"
-                  className="w-full rounded-lg bg-[#0B0F19] border border-white/[0.1] focus:border-indigo-500 px-3 py-2 text-xs font-mono text-indigo-200 focus:outline-none"
-                />
+              </div>
+
+              <div className="p-3 rounded-lg bg-[#111827] border border-white/[0.06] space-y-1">
+                <div className="text-[10px] text-slate-500 font-sans">Active In-App Tier</div>
+                <div className="text-xs font-semibold text-white">
+                  {userIdentity.tier}
+                </div>
+              </div>
+
+              <div className="p-3 rounded-lg bg-[#111827] border border-white/[0.06] space-y-1">
+                <div className="text-[10px] text-slate-500 font-sans">Remaining API Quota</div>
+                <div className="text-xs text-emerald-300">
+                  {userIdentity.quotaLimit >= 999999
+                    ? 'Unlimited Calls'
+                    : `${remainingQuota} of ${userIdentity.quotaLimit} calls left`}
+                </div>
               </div>
             </div>
 
-            <div className="flex items-center justify-end gap-3 pt-1">
-              {savedNotice && (
-                <span className="inline-flex items-center gap-1 text-emerald-400">
-                  <Check className="w-3.5 h-3.5" />
-                  Identifier saved
-                </span>
-              )}
+            <div className="flex items-center justify-between pt-1">
+              <span className="text-[11px] font-mono text-slate-500 truncate max-w-[240px]">
+                Sig: {userIdentity.signature}
+              </span>
               <button
-                type="submit"
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white transition-colors cursor-pointer"
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onOpenQuotaUpgrade();
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white transition-colors cursor-pointer"
               >
-                <UserCheck className="w-3.5 h-3.5" />
-                <span>Update Active Identifier</span>
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Upgrade In-App Quota Pass</span>
               </button>
             </div>
-          </form>
+          </div>
 
           {/* Live API Attribution Ledger */}
-          <div className="pt-4 border-t border-white/[0.08] space-y-3">
+          <div className="space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Activity className="w-4 h-4 text-sky-400" />
                 <span className="font-display text-sm font-semibold text-white">
-                  Live API Usage Attribution
+                  Verified Operator API Usage Ledger
                 </span>
                 <span className="text-slate-600" aria-hidden="true">·</span>
                 <span className="font-mono text-slate-400 tabular-nums">
-                  {totalCalls} total API calls
+                  {totalCalls} total calls
                 </span>
               </div>
               <button
@@ -192,18 +174,19 @@ export const UserIdentityModal: React.FC<UserIdentityModalProps> = ({
 
             {usageRecords.length === 0 ? (
               <div className="p-4 rounded-xl bg-[#0B0F19] border border-white/[0.06] text-slate-400 text-center">
-                No API calls recorded in this server session yet. Send a message or generate an image to log attribution under <strong className="text-slate-200 font-mono">{userIdentity.id}</strong>.
+                No API calls logged yet. Any API call made from this device is permanently attributed to <strong className="text-slate-200 font-mono">{userIdentity.id}</strong>.
               </div>
             ) : (
               <div className="overflow-x-auto rounded-xl border border-white/[0.08] bg-[#0B0F19]">
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
                     <tr className="border-b border-white/[0.08] text-slate-400 bg-[#111827]/60">
-                      <th className="px-3.5 py-2.5 font-medium">Operator / ID</th>
-                      <th className="px-3 py-2.5 font-medium text-right">Chat</th>
-                      <th className="px-3 py-2.5 font-medium text-right">Canvas</th>
-                      <th className="px-3 py-2.5 font-medium text-right">Studio</th>
-                      <th className="px-3.5 py-2.5 font-medium text-right">Total</th>
+                      <th className="px-3.5 py-2.5 font-medium">Verified Operator ID</th>
+                      <th className="px-3 py-2.5 font-medium">Tier</th>
+                      <th className="px-2.5 py-2.5 font-medium text-right">Chat</th>
+                      <th className="px-2.5 py-2.5 font-medium text-right">Canvas</th>
+                      <th className="px-2.5 py-2.5 font-medium text-right">Studio</th>
+                      <th className="px-3.5 py-2.5 font-medium text-right">Used / Limit</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/[0.06] font-mono tabular-nums">
@@ -211,22 +194,25 @@ export const UserIdentityModal: React.FC<UserIdentityModalProps> = ({
                       const isCurrent = rec.userId === userIdentity.id;
                       return (
                         <tr key={rec.userId} className={isCurrent ? 'bg-indigo-500/[0.07]' : ''}>
-                          <td className="px-3.5 py-2.5 font-sans">
-                            <div className="font-medium text-white flex items-center gap-1.5">
-                              <span>{rec.userName}</span>
+                          <td className="px-3.5 py-2.5">
+                            <div className="font-semibold text-white flex items-center gap-1.5">
+                              <span>{rec.userId}</span>
                               {isCurrent && (
-                                <span className="text-[10px] font-mono text-indigo-400">(You)</span>
+                                <span className="text-[10px] text-indigo-400">(This Device)</span>
                               )}
                             </div>
-                            <div className="text-[11px] font-mono text-slate-400">
-                              {rec.userId} · {rec.deviceLabel}
+                            <div className="text-[10px] text-slate-500">
+                              {rec.fingerprintHash} · {rec.deviceLabel}
                             </div>
                           </td>
-                          <td className="px-3 py-2.5 text-right text-slate-300">{rec.chatRequests}</td>
-                          <td className="px-3 py-2.5 text-right text-slate-300">{rec.canvasRequests}</td>
-                          <td className="px-3 py-2.5 text-right text-slate-300">{rec.imageRequests}</td>
+                          <td className="px-3 py-2.5 font-sans text-slate-300">{rec.tier}</td>
+                          <td className="px-2.5 py-2.5 text-right text-slate-300">{rec.chatRequests}</td>
+                          <td className="px-2.5 py-2.5 text-right text-slate-300">{rec.canvasRequests}</td>
+                          <td className="px-2.5 py-2.5 text-right text-slate-300">{rec.imageRequests}</td>
                           <td className="px-3.5 py-2.5 text-right font-semibold text-indigo-300">
-                            {rec.totalRequests}
+                            {rec.quotaLimit >= 999999
+                              ? `${rec.quotaUsed} / ∞`
+                              : `${rec.quotaUsed} / ${rec.quotaLimit}`}
                           </td>
                         </tr>
                       );

@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'crypto';
 import express, { Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -8,6 +9,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = 3000;
+const IDENTITY_HMAC_SECRET =
+  process.env.GEMINI_API_KEY || crypto.randomBytes(32).toString('hex');
 
 function getGenAIClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -44,7 +47,7 @@ function formatApiError(err: unknown): string {
     }
   }
   if (isQuotaExhaustedError(err)) {
-    return 'Free-tier API rate limit or quota reached (429 RESOURCE_EXHAUSTED). You can switch to high-throughput Flash-Lite or attach a fresh free or billing-enabled API key in the Settings > Secrets panel to continue immediately.';
+    return 'Operator API quota limit reached (429 RESOURCE_EXHAUSTED). Activate an instant Free Burst Refill or upgrade your In-App Studio Pass directly inside MANBOT to continue immediately.';
   }
   return raw || 'An unexpected error occurred while communicating with MANBOT.';
 }
@@ -78,45 +81,137 @@ interface IncomingMessage {
   attachments?: IncomingAttachment[];
 }
 
+type OperatorTier = 'Starter Free' | 'Pro Studio' | 'Unlimited Enterprise';
+
 interface OperatorUsageRecord {
   userId: string;
-  userName: string;
+  fingerprintHash: string;
   deviceLabel: string;
+  tier: OperatorTier;
+  quotaUsed: number;
+  quotaLimit: number;
   totalRequests: number;
   chatRequests: number;
   canvasRequests: number;
   imageRequests: number;
   lastModel: string;
   lastActiveAt: string;
+  issuedAt: string;
 }
 
 const operatorUsageLedger = new Map<string, OperatorUsageRecord>();
 
-function recordOperatorApiCall(params: {
-  userId?: string;
-  userName?: string;
-  deviceLabel?: string;
-  kind: 'chat' | 'canvas' | 'image';
-  model: string;
-}) {
-  const id = (params.userId || 'USR-DEFAULT').trim();
-  const name = (params.userName || 'Primary Operator').trim();
-  const device = (params.deviceLabel || 'Web Studio').trim();
+function computeOperatorSignature(userId: string, fingerprintHash: string): string {
+  return crypto
+    .createHmac('sha256', IDENTITY_HMAC_SECRET)
+    .update(`${userId}:${fingerprintHash}`)
+    .digest('hex')
+    .slice(0, 24);
+}
 
-  const existing = operatorUsageLedger.get(id) || {
-    userId: id,
-    userName: name,
+function deriveImmutableIdentity(req: Request, clientSeed?: string, deviceLabel?: string) {
+  const ua = req.headers['user-agent'] || 'manbot-runtime';
+  const lang = req.headers['accept-language'] || 'en';
+  const rawMaterial = `${ua}|${lang}|${clientSeed || 'default-seed'}`;
+
+  const fullHash = crypto.createHash('sha256').update(rawMaterial).digest('hex').toUpperCase();
+  const userId = `OP-${fullHash.slice(0, 8)}`;
+  const fingerprintHash = `SHA256:${fullHash.slice(8, 24)}`;
+  const signature = computeOperatorSignature(userId, fingerprintHash);
+  const cleanDevice = (deviceLabel || 'Desktop Studio').trim();
+
+  let record = operatorUsageLedger.get(userId);
+  if (!record) {
+    record = {
+      userId,
+      fingerprintHash,
+      deviceLabel: cleanDevice,
+      tier: 'Starter Free',
+      quotaUsed: 0,
+      quotaLimit: 25,
+      totalRequests: 0,
+      chatRequests: 0,
+      canvasRequests: 0,
+      imageRequests: 0,
+      lastModel: 'gemini-4-hydrogen',
+      lastActiveAt: new Date().toISOString(),
+      issuedAt: new Date().toISOString(),
+    };
+    operatorUsageLedger.set(userId, record);
+  } else {
+    record.deviceLabel = cleanDevice;
+  }
+
+  return {
+    id: record.userId,
+    fingerprintHash: record.fingerprintHash,
+    signature,
+    deviceLabel: record.deviceLabel,
+    tier: record.tier,
+    quotaUsed: record.quotaUsed,
+    quotaLimit: record.quotaLimit,
+    issuedAt: record.issuedAt,
+  };
+}
+
+function verifyAndRecordOperatorApiCall(
+  req: Request,
+  params: {
+    userIdentity?: {
+      id?: string;
+      fingerprintHash?: string;
+      signature?: string;
+      deviceLabel?: string;
+    } | null;
+    kind: 'chat' | 'canvas' | 'image';
+    model: string;
+  }
+): OperatorUsageRecord {
+  const provided = params.userIdentity;
+  let verifiedId = '';
+  let verifiedFingerprint = '';
+
+  if (
+    provided?.id &&
+    provided?.fingerprintHash &&
+    provided?.signature &&
+    computeOperatorSignature(provided.id, provided.fingerprintHash) === provided.signature
+  ) {
+    verifiedId = provided.id;
+    verifiedFingerprint = provided.fingerprintHash;
+  } else {
+    // Reject spoofed ID and bind to server-derived cryptographic identity
+    const derived = deriveImmutableIdentity(req, undefined, provided?.deviceLabel);
+    verifiedId = derived.id;
+    verifiedFingerprint = derived.fingerprintHash;
+  }
+
+  const device = (provided?.deviceLabel || 'Desktop Studio').trim();
+
+  const existing = operatorUsageLedger.get(verifiedId) || {
+    userId: verifiedId,
+    fingerprintHash: verifiedFingerprint,
     deviceLabel: device,
+    tier: 'Starter Free' as OperatorTier,
+    quotaUsed: 0,
+    quotaLimit: 25,
     totalRequests: 0,
     chatRequests: 0,
     canvasRequests: 0,
     imageRequests: 0,
     lastModel: params.model,
     lastActiveAt: new Date().toISOString(),
+    issuedAt: new Date().toISOString(),
   };
 
-  existing.userName = name;
+  if (existing.quotaUsed >= existing.quotaLimit) {
+    throw new Error(
+      `Operator ${verifiedId} has reached the ${existing.tier} limit (${existing.quotaUsed}/${existing.quotaLimit} calls). Activate an instant in-app refill or upgrade your tier inside MANBOT (429 RESOURCE_EXHAUSTED).`
+    );
+  }
+
   existing.deviceLabel = device;
+  existing.quotaUsed += 1;
   existing.totalRequests += 1;
   if (params.kind === 'chat') existing.chatRequests += 1;
   if (params.kind === 'canvas') existing.canvasRequests += 1;
@@ -124,7 +219,8 @@ function recordOperatorApiCall(params: {
   existing.lastModel = params.model;
   existing.lastActiveAt = new Date().toISOString();
 
-  operatorUsageLedger.set(id, existing);
+  operatorUsageLedger.set(verifiedId, existing);
+  return existing;
 }
 
 async function startServer() {
@@ -138,6 +234,73 @@ async function startServer() {
       assistant: 'MANBOT',
       hasApiKey: Boolean(process.env.GEMINI_API_KEY),
       timestamp: new Date().toISOString(),
+    });
+  });
+
+  // Issue or Verify Immutable Cryptographic Operator Identity
+  app.post('/api/identity/session', (req: Request, res: Response) => {
+    const { clientSeed, deviceLabel } = req.body as {
+      clientSeed?: string;
+      deviceLabel?: string;
+    };
+    const identity = deriveImmutableIdentity(req, clientSeed, deviceLabel);
+    res.json({ identity });
+  });
+
+  // In-App Instant API Quota & Tier Provisioning (100% inside the app, zero external links)
+  app.post('/api/quota/upgrade', (req: Request, res: Response) => {
+    const { userIdentity, targetPlan } = req.body as {
+      userIdentity?: {
+        id?: string;
+        fingerprintHash?: string;
+        signature?: string;
+        deviceLabel?: string;
+      };
+      targetPlan: 'burst_refill' | 'pro_studio' | 'unlimited_enterprise';
+    };
+
+    const derived =
+      userIdentity?.id &&
+      userIdentity?.fingerprintHash &&
+      userIdentity?.signature &&
+      computeOperatorSignature(userIdentity.id, userIdentity.fingerprintHash) ===
+        userIdentity.signature
+        ? operatorUsageLedger.get(userIdentity.id) ||
+          (() => {
+            const d = deriveImmutableIdentity(req, undefined, userIdentity?.deviceLabel);
+            return operatorUsageLedger.get(d.id)!;
+          })()
+        : (() => {
+            const d = deriveImmutableIdentity(req, undefined, userIdentity?.deviceLabel);
+            return operatorUsageLedger.get(d.id)!;
+          })();
+
+    if (targetPlan === 'burst_refill') {
+      derived.quotaLimit += 25;
+    } else if (targetPlan === 'pro_studio') {
+      derived.tier = 'Pro Studio';
+      derived.quotaLimit = Math.max(derived.quotaLimit + 1000, 1000);
+    } else if (targetPlan === 'unlimited_enterprise') {
+      derived.tier = 'Unlimited Enterprise';
+      derived.quotaLimit = 999999;
+    }
+
+    derived.lastActiveAt = new Date().toISOString();
+    operatorUsageLedger.set(derived.userId, derived);
+
+    const signature = computeOperatorSignature(derived.userId, derived.fingerprintHash);
+    res.json({
+      status: 'upgraded',
+      identity: {
+        id: derived.userId,
+        fingerprintHash: derived.fingerprintHash,
+        signature,
+        deviceLabel: derived.deviceLabel,
+        tier: derived.tier,
+        quotaUsed: derived.quotaUsed,
+        quotaLimit: derived.quotaLimit,
+        issuedAt: derived.issuedAt,
+      },
     });
   });
 
@@ -180,18 +343,28 @@ async function startServer() {
         useGoogleSearch?: boolean;
         systemInstruction?: string;
         activeCanvasContext?: { title: string; language: string; content: string } | null;
-        userIdentity?: { id?: string; name?: string; deviceLabel?: string } | null;
+        userIdentity?: {
+          id?: string;
+          fingerprintHash?: string;
+          signature?: string;
+          deviceLabel?: string;
+        } | null;
       };
 
       const validModel =
         model === 'gemini-3.1-flash-lite' ? 'gemini-3.1-flash-lite' : 'gemini-4-hydrogen';
 
-      recordOperatorApiCall({
-        userId: userIdentity?.id,
-        userName: userIdentity?.name,
-        deviceLabel: userIdentity?.deviceLabel,
+      const updatedOperator = verifyAndRecordOperatorApiCall(req, {
+        userIdentity,
         kind: 'chat',
         model: validModel,
+      });
+
+      sendEvent({
+        type: 'quota_sync',
+        quotaUsed: updatedOperator.quotaUsed,
+        quotaLimit: updatedOperator.quotaLimit,
+        tier: updatedOperator.tier,
       });
 
       const contents = messages.map((msg) => {
@@ -342,13 +515,16 @@ async function startServer() {
         language?: string;
         content: string;
         instruction: string;
-        userIdentity?: { id?: string; name?: string; deviceLabel?: string } | null;
+        userIdentity?: {
+          id?: string;
+          fingerprintHash?: string;
+          signature?: string;
+          deviceLabel?: string;
+        } | null;
       };
 
-      recordOperatorApiCall({
-        userId: userIdentity?.id,
-        userName: userIdentity?.name,
-        deviceLabel: userIdentity?.deviceLabel,
+      verifyAndRecordOperatorApiCall(req, {
+        userIdentity,
         kind: 'canvas',
         model: 'gemini-4-hydrogen',
       });
@@ -417,13 +593,16 @@ Return ONLY the transformed ${language} content without surrounding conversation
         prompt: string;
         aspectRatio?: '1:1' | '16:9' | '4:3' | '3:4' | '9:16';
         referenceImage?: { mimeType: string; base64Data: string } | null;
-        userIdentity?: { id?: string; name?: string; deviceLabel?: string } | null;
+        userIdentity?: {
+          id?: string;
+          fingerprintHash?: string;
+          signature?: string;
+          deviceLabel?: string;
+        } | null;
       };
 
-      recordOperatorApiCall({
-        userId: userIdentity?.id,
-        userName: userIdentity?.name,
-        deviceLabel: userIdentity?.deviceLabel,
+      verifyAndRecordOperatorApiCall(req, {
+        userIdentity,
         kind: 'image',
         model: 'gemini-3.1-flash-lite-image',
       });
